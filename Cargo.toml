@@ -1,0 +1,20 @@
+[package]
+name = "tensorterm"
+version = "0.1.0"
+edition = "2021"
+description = "Cyberpunk research intelligence terminal dashboard"
+license = "MIT"
+repository = "https://github.com/yourusername/tensorterm"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+color-eyre = "0.6"
+roxmltree = "0.20"
