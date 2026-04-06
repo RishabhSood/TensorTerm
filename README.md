@@ -130,27 +130,8 @@ All data fetching is async and non-blocking. Papers auto-load on startup, metada
 
 ## Layout
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  ██▓▒░ T E N S O R  //  T E R M ░▒▓██                   │
-│  Research Intelligence Terminal · v0.1.0 · [profile]     │
-├────────────────────┬─────────────────────────────────────┤
-│  PAPER FEED        │  ARTICLE VIEW                       │
-│  [1/42] <24h>      │  Paper title, authors, abstract,    │
-│                    │  TL;DR, LLM summaries, scaffold,    │
-│  > Paper title 1   │  HF metadata, citations, links,     │
-│    Paper title 2   │  GitHub repo + stars                │
-│    Paper title 3   │                                     │
-│    ...             │                                     │
-├────────────────────┤                                     │
-│  SPOTLIGHT         │                                     │
-│  HF Daily Top      │                                     │
-│  Paper + summary   │                                     │
-├────────────────────┴─────────────────────────────────────┤
-│ [q] quit [Tab] pane [j/k] scroll [f] feed [/] filter    │
-└──────────────────────────────────────────────────────────┘
-```
-
+![paper_feed_view](imgs/paper_feed_view.png)
+![socia_feed_view](imgs/social_feed_view.png)
 Three panes: **Feed** (top-left), **Spotlight** (bottom-left), **Article** (right). Navigate between them with `Tab` or `h`/`l`.
 
 ---
