@@ -49,15 +49,15 @@ It goes beyond reading: you can generate LLM-powered summaries in multiple modes
 ### Homebrew (macOS/Linux)
 
 ```sh
-brew tap yourusername/tap
+brew tap RishabhSood/tap
 brew install tensorterm
 ```
 
 ### From source
 
 ```sh
-git clone https://github.com/yourusername/tensorterm.git
-cd tensorterm
+git clone https://github.com/RishabhSood/TensorTerm.git
+cd TensorTerm
 cargo install --path .
 ```
 
@@ -265,7 +265,7 @@ model = "gpt-4o"
 # api_key = "sk-..."  # or set OPENAI_API_KEY env var
 ```
 
-### Ollama (Local, Free)
+### Ollama (Local or Cloud)
 
 ```toml
 [[llm.openai_compatible]]
