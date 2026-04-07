@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{ActivePane, App, FeedMode, MetaFetchStatus, SummaryMode};
+use crate::app::{ActivePane, App, FeedMode, MetaFetchStatus, VaultLevel};
 use crate::providers::social::SourceType;
 use crate::ui::{Theme, SPINNER};
 use super::pane_block;
@@ -16,12 +16,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = match app.feed_mode {
         FeedMode::Papers => "ARTICLE VIEW",
         FeedMode::Social => "POST VIEW",
+        FeedMode::Vault => "VAULT ARTICLE",
     };
     let block = pane_block(title, is_active, app.tick_count, false);
 
     let content = match app.feed_mode {
         FeedMode::Papers => render_paper_content(app, area),
         FeedMode::Social => render_social_content(app),
+        FeedMode::Vault => render_vault_content(app, area),
     };
 
     // Cap article scroll at content height
@@ -379,8 +381,26 @@ fn render_paper_content(app: &mut App, area: Rect) -> Vec<Line<'static>> {
     } else {
         "[i]  Spawn implementation scaffold"
     };
+
+    // Show collections membership
+    if let Some(ref id) = paper.arxiv_id {
+        let cols = app.vault.collections_containing(id);
+        if !cols.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("Saved in ", Theme::dim()),
+                Span::styled(
+                    cols.join(", "),
+                    Style::default().fg(Theme::NEON_GREEN).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(""));
+        }
+    }
+
     lines.push(Line::from(Span::styled(scaffold_label, Theme::accent())));
     lines.push(Line::from(Span::styled("[o]  Export to Obsidian vault", Theme::accent())));
+    lines.push(Line::from(Span::styled("[b]  Bookmark paper", Theme::accent())));
+    lines.push(Line::from(Span::styled("[B]  Bookmark to collection...", Theme::accent())));
     lines.push(Line::from(Span::styled(
         format!("[m]  Cycle summary mode ({})", app.summary_mode.label()),
         Theme::accent(),
@@ -453,4 +473,238 @@ fn render_social_content(app: &App) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled("[Enter]  Open in browser", Theme::accent())));
 
     lines
+}
+
+fn render_vault_content(app: &mut App, area: Rect) -> Vec<Line<'static>> {
+    match &app.vault_level {
+        VaultLevel::Collections => {
+            // Show which collection is selected and whether it's deletable
+            let names: Vec<String> = app.vault.collection_names().iter().map(|s| s.to_string()).collect();
+            let selected_name = app.vault_state.selected().and_then(|i| names.get(i)).cloned();
+            let can_delete = selected_name.as_deref().map_or(false, |n| n != "Reading List");
+
+            let mut lines = vec![
+                Line::from(""),
+                Line::from(Span::styled("  Select a collection to browse.", Theme::dim())),
+                Line::from(""),
+                Line::from(Span::styled("  [Enter]  Open collection", Theme::accent())),
+            ];
+            if can_delete {
+                lines.push(Line::from(Span::styled("  [d]      Delete collection", Theme::accent())));
+            }
+            lines
+        }
+        VaultLevel::Papers(col) => {
+            let col = col.clone();
+            let Some(paper) = app.selected_vault_paper() else {
+                return vec![
+                    Line::from(""),
+                    Line::from(Span::styled("  No paper selected.", Theme::dim())),
+                ];
+            };
+
+            let title = paper.title.clone();
+            let authors = paper.authors.clone();
+            let date = paper.date.clone();
+            let domain = paper.domain.clone();
+            let arxiv_id = paper.arxiv_id.clone();
+            let separator = "\u{2500}".repeat(area.width.saturating_sub(4) as usize);
+
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Theme::NEON_CYAN)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Authors  ", Theme::dim()),
+                    Span::styled(authors, Theme::text()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Date     ", Theme::dim()),
+                    Span::styled(date, Theme::text()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Domain   ", Theme::dim()),
+                    Span::styled(domain, Style::default().fg(Theme::DOMAIN_TAG)),
+                ]),
+            ];
+
+            if let Some(ref id) = arxiv_id {
+                lines.push(Line::from(vec![
+                    Span::styled("ArXiv    ", Theme::dim()),
+                    Span::styled(id.clone(), Theme::accent()),
+                ]));
+            }
+
+            // Show all collections this paper belongs to
+            if let Some(ref id) = arxiv_id {
+                let cols = app.vault.collections_containing(id);
+                if !cols.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("Saved in ", Theme::dim()),
+                        Span::styled(
+                            cols.join(", "),
+                            Style::default().fg(Theme::NEON_GREEN).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(separator.clone(), Theme::dim())));
+
+            // Summary section
+            {
+                let aid = arxiv_id.clone().unwrap_or_default();
+
+                // HF TL;DR
+                if let Some(ref ai_sum) = arxiv_id.as_deref()
+                    .and_then(|id| app.meta_cache.get(id))
+                    .and_then(|m| m.ai_summary.clone())
+                {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        " TL;DR ",
+                        Style::default()
+                            .fg(Theme::DARK_BG)
+                            .bg(Theme::NEON_MAGENTA)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(ai_sum.clone(), Theme::text())));
+                }
+
+                // LLM summary
+                if app.summary_mode.needs_llm() {
+                    let cache_key = format!("{}:{}", aid, app.summary_mode.api_key());
+                    if let Some(summary_text) = app.summary_cache.get(&cache_key) {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            format!(" {} ", app.summary_mode.label()),
+                            Style::default()
+                                .fg(Theme::DARK_BG)
+                                .bg(Theme::NEON_MAGENTA)
+                                .add_modifier(Modifier::BOLD),
+                        )));
+                        lines.push(Line::from(""));
+                        lines.extend(crate::ui::markdown::render_markdown(summary_text));
+                    } else if app.loading.iter().any(|t| matches!(t, crate::app::LoadingTask::LlmSummary(_))) {
+                        let spinner_char = SPINNER[(app.tick_count as usize) % SPINNER.len()];
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            format!("{} Generating {} summary...", spinner_char, app.summary_mode.label()),
+                            Style::default().fg(Theme::NEON_MAGENTA),
+                        )));
+                    } else {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            format!("{} selected \u{2014} press [M] to generate", app.summary_mode.label()),
+                            Theme::dim(),
+                        )));
+                    }
+                }
+
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(separator.clone(), Theme::dim())));
+            }
+
+            // Scaffold section
+            {
+                let aid = arxiv_id.clone().unwrap_or_default();
+                let scaffold_path = app.scaffold_index.get(&aid);
+                let is_generating = app.loading.iter().any(|t| matches!(t, crate::app::LoadingTask::LlmScaffold(_)));
+
+                if let Some(path) = scaffold_path {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        " IMPLEMENTATION SCAFFOLD ",
+                        Style::default()
+                            .fg(Theme::DARK_BG)
+                            .bg(Theme::NEON_YELLOW)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("  Generated at: {}", path),
+                        Style::default().fg(Theme::NEON_GREEN),
+                    )));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(separator.clone(), Theme::dim())));
+                } else if is_generating {
+                    let spinner_char = SPINNER[(app.tick_count as usize) % SPINNER.len()];
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("{} Generating scaffold...", spinner_char),
+                        Style::default().fg(Theme::NEON_YELLOW),
+                    )));
+                }
+            }
+
+            // Metadata
+            if let Some(id) = &arxiv_id {
+                if let Some(meta) = app.meta_cache.get(id.as_str()) {
+                    if meta.meta_status == MetaFetchStatus::Loaded {
+                        if meta.upvotes > 0 {
+                            lines.push(Line::from(""));
+                            lines.push(Line::from(vec![
+                                Span::styled("HF Upvotes   ", Theme::dim()),
+                                Span::styled(
+                                    format!("\u{2191}{}", meta.upvotes),
+                                    Style::default()
+                                        .fg(Theme::NEON_YELLOW)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        }
+                        if !meta.ai_keywords.is_empty() {
+                            let kw_text = meta.ai_keywords.join(" \u{00b7} ");
+                            lines.push(Line::from(Span::styled(
+                                kw_text,
+                                Style::default().fg(Theme::KEYWORD_HIT),
+                            )));
+                        }
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(separator, Theme::dim())));
+                    } else if meta.meta_status == MetaFetchStatus::Loading {
+                        let spinner_char = SPINNER[(app.tick_count as usize) % SPINNER.len()];
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            format!("{} Loading metadata...", spinner_char),
+                            Style::default().fg(Theme::NEON_CYAN),
+                        )));
+                    }
+                }
+            }
+
+            // Action hints
+            lines.push(Line::from(""));
+            let scaffold_exists = arxiv_id.as_deref()
+                .and_then(|id| app.scaffold_index.get(id))
+                .is_some();
+            let scaffold_label = if scaffold_exists {
+                "[i]  Re-spawn implementation scaffold"
+            } else {
+                "[i]  Spawn implementation scaffold"
+            };
+            lines.push(Line::from(Span::styled(scaffold_label, Theme::accent())));
+            lines.push(Line::from(Span::styled("[o]  Export to Obsidian vault", Theme::accent())));
+            lines.push(Line::from(Span::styled(
+                format!("[m]  Cycle summary mode ({})", app.summary_mode.label()),
+                Theme::accent(),
+            )));
+            if app.summary_mode.needs_llm() {
+                lines.push(Line::from(Span::styled("[M]  Generate summary", Theme::accent())));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("[d]  Remove from {}", col),
+                Theme::accent(),
+            )));
+            lines.push(Line::from(Span::styled("[Enter]  Open in browser", Theme::accent())));
+
+            lines
+        }
+    }
 }

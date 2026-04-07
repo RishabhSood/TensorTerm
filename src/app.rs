@@ -10,6 +10,7 @@ use crate::network::{NetworkAction, NetworkEvent};
 use crate::providers::huggingface::HfSpotlight;
 use crate::providers::social::SocialPost;
 use crate::scaffold_index::ScaffoldIndex;
+use crate::vault::Vault;
 
 // ── Enums ────────────────────────────────────────────────────
 
@@ -42,8 +43,11 @@ pub enum InputMode {
     Normal,
     Help,
     Filter,
+    Search,
     Confirm,
     ScaffoldPrompt,
+    CollectionPicker,
+    NewCollection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,12 +82,31 @@ pub enum Action {
     FilterInput(char),
     FilterBackspace,
     ConfirmFilter,
+    StartSearch,
+    SearchInput(char),
+    SearchBackspace,
+    SubmitSearch,
+    BookmarkPaper,
+    BookmarkPaperTo,
+    RemoveFromVault,
+    DeleteCollection,
+    CollectionPickerConfirm,
+    NewCollectionInput(char),
+    NewCollectionBackspace,
+    NewCollectionConfirm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedMode {
     Papers,
     Social,
+    Vault,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultLevel {
+    Collections,
+    Papers(String), // collection name
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,6 +373,11 @@ pub struct App {
     // Filter
     pub filter_text: String,
 
+    // Search (HF paper search)
+    pub search_query: String,
+    pub search_results: Option<Vec<PaperEntry>>,
+    pub search_state: ListState,
+
     // Sort (paper feed only)
     pub paper_sort: PaperSort,
 
@@ -379,6 +407,14 @@ pub struct App {
     // Persistent scaffold path index
     pub scaffold_index: ScaffoldIndex,
 
+    // Vault (paper collections)
+    pub vault: Vault,
+    pub vault_level: VaultLevel,
+    pub vault_state: ListState,
+    pub collection_picker_state: ListState,
+    pub new_collection_name: String,
+    pub help_scroll: u16,
+
     // Confirm mode state
     pub confirm_message: String,
     confirm_action: Option<Box<dyn FnOnce(&mut App) + Send>>,
@@ -400,6 +436,7 @@ impl App {
     ) -> Self {
         let profile_keys = config.profile_keys();
         let mut active_profile_key = config.general.default_profile.clone();
+        let implementations_dir = config.general.implementations_dir.clone();
 
         if !config.profiles.contains_key(&active_profile_key) {
             if let Some(first) = profile_keys.first() {
@@ -438,6 +475,9 @@ impl App {
             social_state: ListState::default(),
             social_loaded_at: None,
             filter_text: String::new(),
+            search_query: String::new(),
+            search_results: None,
+            search_state: ListState::default(),
             paper_sort: PaperSort::Date,
             time_window: TimeWindow::Day,
             max_items: 50,
@@ -449,8 +489,14 @@ impl App {
             full_text_cache: HashMap::new(),
             pending_export_force: None,
             scaffold_project_name: String::new(),
-            scaffold_output_dir: "./implementations".into(),
+            scaffold_output_dir: implementations_dir,
             scaffold_index: ScaffoldIndex::load(),
+            vault: Vault::load(),
+            vault_level: VaultLevel::Collections,
+            vault_state: ListState::default(),
+            collection_picker_state: ListState::default(),
+            new_collection_name: String::new(),
+            help_scroll: 0,
             confirm_message: String::new(),
             confirm_action: None,
             last_selected_arxiv_id: None,
@@ -473,13 +519,15 @@ impl App {
     }
 
     fn check_meta_debounce(&mut self) {
-        if self.feed_mode != FeedMode::Papers {
+        if self.feed_mode != FeedMode::Papers && self.feed_mode != FeedMode::Vault {
             return;
         }
 
-        let current_id = self
-            .selected_paper()
-            .and_then(|p| p.arxiv_id.clone());
+        let current_id = if self.feed_mode == FeedMode::Vault {
+            self.selected_vault_paper().and_then(|p| p.arxiv_id)
+        } else {
+            self.selected_paper().and_then(|p| p.arxiv_id.clone())
+        };
 
         if current_id != self.last_selected_arxiv_id {
             self.last_selected_arxiv_id = current_id;
@@ -563,6 +611,16 @@ impl App {
                         self.social_state.select(Some(0));
                     }
                 }
+                NetworkEvent::SearchResultsLoaded(papers) => {
+                    self.loading.remove(&LoadingTask::Feed);
+                    let count = papers.len();
+                    self.search_results = Some(papers);
+                    self.search_state = ListState::default();
+                    if count > 0 {
+                        self.search_state.select(Some(0));
+                    }
+                    self.set_status(format!("Found {} results for \"{}\"", count, self.search_query));
+                }
                 NetworkEvent::SummaryLoaded { arxiv_id, mode, text } => {
                     let key = format!("{}:{}", arxiv_id, mode);
                     self.loading.remove(&LoadingTask::LlmSummary(key.clone()));
@@ -573,9 +631,15 @@ impl App {
                         .remove(&LoadingTask::LlmScaffold(arxiv_id.clone()));
                     self.scaffold_cache.insert(arxiv_id.clone(), text.clone());
 
-                    // Write to disk
-                    let dir = std::path::Path::new(&self.scaffold_output_dir)
-                        .join(&self.scaffold_project_name);
+                    // Write to disk — expand ~ in output dir
+                    let base = if self.scaffold_output_dir.starts_with('~') {
+                        dirs::home_dir()
+                            .unwrap_or_default()
+                            .join(self.scaffold_output_dir.strip_prefix("~/").unwrap_or(&self.scaffold_output_dir[1..]))
+                    } else {
+                        std::path::PathBuf::from(&self.scaffold_output_dir)
+                    };
+                    let dir = base.join(&self.scaffold_project_name);
                     match std::fs::create_dir_all(&dir) {
                         Ok(_) => {
                             let path = dir.join("scaffold.md");
@@ -624,6 +688,8 @@ impl App {
         match self.input_mode {
             InputMode::Help => match key.code {
                 KeyCode::Char('?') => Some(Action::ToggleHelp),
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::ScrollDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::ScrollUp),
                 KeyCode::Esc => Some(Action::Dismiss),
                 KeyCode::Char('q') => Some(Action::Quit),
                 _ => None,
@@ -633,6 +699,13 @@ impl App {
                 KeyCode::Enter => Some(Action::ConfirmFilter),
                 KeyCode::Backspace => Some(Action::FilterBackspace),
                 KeyCode::Char(c) => Some(Action::FilterInput(c)),
+                _ => None,
+            },
+            InputMode::Search => match key.code {
+                KeyCode::Esc => Some(Action::Dismiss),
+                KeyCode::Enter => Some(Action::SubmitSearch),
+                KeyCode::Backspace => Some(Action::SearchBackspace),
+                KeyCode::Char(c) => Some(Action::SearchInput(c)),
                 _ => None,
             },
             InputMode::Confirm => match key.code {
@@ -645,6 +718,20 @@ impl App {
                 KeyCode::Enter => Some(Action::ScaffoldConfirm),
                 KeyCode::Backspace => Some(Action::ScaffoldBackspace),
                 KeyCode::Char(c) => Some(Action::ScaffoldInput(c)),
+                _ => None,
+            },
+            InputMode::CollectionPicker => match key.code {
+                KeyCode::Esc => Some(Action::Dismiss),
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::ScrollDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::ScrollUp),
+                KeyCode::Enter => Some(Action::CollectionPickerConfirm),
+                _ => None,
+            },
+            InputMode::NewCollection => match key.code {
+                KeyCode::Esc => Some(Action::Dismiss),
+                KeyCode::Enter => Some(Action::NewCollectionConfirm),
+                KeyCode::Backspace => Some(Action::NewCollectionBackspace),
+                KeyCode::Char(c) => Some(Action::NewCollectionInput(c)),
                 _ => None,
             },
             InputMode::Normal => match key.code {
@@ -668,6 +755,26 @@ impl App {
                 KeyCode::Char('f') => Some(Action::ToggleFeedMode),
                 KeyCode::Char('/') => Some(Action::StartFilter),
                 KeyCode::Char('s') => Some(Action::CycleSort),
+                KeyCode::Char('S') => Some(Action::StartSearch),
+                KeyCode::Char('b') if self.feed_mode != FeedMode::Social => Some(Action::BookmarkPaper),
+                KeyCode::Char('B') if self.feed_mode != FeedMode::Social => Some(Action::BookmarkPaperTo),
+                KeyCode::Char('d') => {
+                    if self.feed_mode == FeedMode::Vault {
+                        match &self.vault_level {
+                            VaultLevel::Collections => {
+                                // Don't even offer delete for Reading List
+                                let names: Vec<&str> = self.vault.collection_names();
+                                let is_reading_list = self.vault_state.selected()
+                                    .and_then(|i| names.get(i))
+                                    .map_or(true, |n| *n == "Reading List");
+                                if is_reading_list { None } else { Some(Action::DeleteCollection) }
+                            }
+                            VaultLevel::Papers(_) => Some(Action::RemoveFromVault),
+                        }
+                    } else {
+                        None
+                    }
+                }
                 KeyCode::Char('t') => Some(Action::CycleTimeWindow),
                 KeyCode::Char('n') => Some(Action::CycleMaxItems),
                 KeyCode::Char('m') => Some(Action::CycleSummaryMode),
@@ -697,19 +804,31 @@ impl App {
             Action::ToggleHelp => {
                 self.input_mode = match self.input_mode {
                     InputMode::Help => InputMode::Normal,
-                    _ => InputMode::Help,
+                    _ => {
+                        self.help_scroll = 0;
+                        InputMode::Help
+                    }
                 };
             }
             Action::ToggleFeedMode => {
                 self.feed_mode = match self.feed_mode {
                     FeedMode::Papers => FeedMode::Social,
-                    FeedMode::Social => FeedMode::Papers,
+                    FeedMode::Social => FeedMode::Vault,
+                    FeedMode::Vault => FeedMode::Papers,
                 };
                 self.article_scroll = 0;
                 self.set_status(match self.feed_mode {
                     FeedMode::Papers => "Feed \u{2192} Papers",
                     FeedMode::Social => "Feed \u{2192} Social",
+                    FeedMode::Vault => "Feed \u{2192} Vault",
                 });
+                if self.feed_mode == FeedMode::Vault {
+                    self.vault_level = VaultLevel::Collections;
+                    self.vault_state = ListState::default();
+                    if !self.vault.collections.is_empty() {
+                        self.vault_state.select(Some(0));
+                    }
+                }
             }
             Action::StartFilter => {
                 self.input_mode = InputMode::Filter;
@@ -794,9 +913,180 @@ impl App {
             Action::ConfirmFilter => {
                 self.input_mode = InputMode::Normal;
             }
+            Action::StartSearch => {
+                if self.feed_mode == FeedMode::Papers {
+                    self.search_query.clear();
+                    self.input_mode = InputMode::Search;
+                }
+            }
+            Action::SearchInput(c) => {
+                self.search_query.push(c);
+            }
+            Action::SearchBackspace => {
+                self.search_query.pop();
+            }
+            Action::SubmitSearch => {
+                self.input_mode = InputMode::Normal;
+                if !self.search_query.is_empty() {
+                    self.loading.insert(LoadingTask::Feed);
+                    let query = self.search_query.clone();
+                    let _ = self.net_tx.try_send(NetworkAction::SearchPapers(query));
+                    self.set_status(format!("Searching: {}...", self.search_query));
+                }
+            }
+            Action::BookmarkPaper => {
+                self.bookmark_to_collection("Reading List");
+            }
+            Action::BookmarkPaperTo => {
+                if self.active_paper().is_none() {
+                    self.set_status("No paper selected.");
+                    return;
+                }
+                let names = self.vault.collection_names();
+                if names.is_empty() {
+                    self.set_status("No collections. Bookmark with [b] first.");
+                    return;
+                }
+                self.collection_picker_state = ListState::default();
+                self.collection_picker_state.select(Some(0));
+                self.input_mode = InputMode::CollectionPicker;
+            }
+            Action::CollectionPickerConfirm => {
+                let names: Vec<String> = self.vault.collection_names().iter().map(|s| s.to_string()).collect();
+                let total = names.len() + 1; // +1 for "New Collection..."
+                if let Some(idx) = self.collection_picker_state.selected() {
+                    if idx < names.len() {
+                        // Existing collection selected
+                        let name = names[idx].clone();
+                        self.input_mode = InputMode::Normal;
+                        self.bookmark_to_collection(&name);
+                    } else if idx == total - 1 {
+                        // "New Collection..." selected
+                        self.new_collection_name.clear();
+                        self.input_mode = InputMode::NewCollection;
+                    }
+                }
+            }
+            Action::NewCollectionInput(c) => {
+                self.new_collection_name.push(c);
+            }
+            Action::NewCollectionBackspace => {
+                self.new_collection_name.pop();
+            }
+            Action::NewCollectionConfirm => {
+                let name = self.new_collection_name.trim().to_string();
+                if name.is_empty() {
+                    self.set_status("Collection name cannot be blank.");
+                    return;
+                }
+                // Case-insensitive uniqueness check
+                let exists = self.vault.collection_names().iter().any(|n| n.eq_ignore_ascii_case(&name));
+                if exists {
+                    self.set_status(format!("Collection \"{}\" already exists.", name));
+                    return;
+                }
+                self.vault.create_collection(&name);
+                self.input_mode = InputMode::Normal;
+                self.bookmark_to_collection(&name);
+            }
+            Action::RemoveFromVault => {
+                if self.feed_mode != FeedMode::Vault {
+                    return;
+                }
+                if let VaultLevel::Papers(ref collection) = self.vault_level {
+                    let collection = collection.clone();
+                    let papers = self.vault.papers_in(&collection);
+                    if let Some(idx) = self.vault_state.selected() {
+                        if let Some(arxiv_id) = papers.get(idx) {
+                            let arxiv_id = arxiv_id.to_string();
+                            let title = self.vault.paper_cache.get(&arxiv_id)
+                                .map(|c| c.title.clone())
+                                .unwrap_or_else(|| arxiv_id.clone());
+                            let display: String = title.chars().take(40).collect();
+                            self.confirm_message = format!("Remove \"{}\" from {}?", display, collection);
+                            self.input_mode = InputMode::Confirm;
+                            let col = collection.clone();
+                            let id = arxiv_id.clone();
+                            self.confirm_action = Some(Box::new(move |app: &mut App| {
+                                app.vault.remove_paper(&col, &id);
+                                app.set_status(format!("Removed from {}", col));
+                                let new_len = app.vault.papers_in(&col).len();
+                                if new_len == 0 {
+                                    app.vault_state.select(None);
+                                } else if idx >= new_len {
+                                    app.vault_state.select(Some(new_len - 1));
+                                }
+                            }));
+                        }
+                    }
+                }
+            }
+            Action::DeleteCollection => {
+                if self.feed_mode != FeedMode::Vault {
+                    return;
+                }
+                if !matches!(self.vault_level, VaultLevel::Collections) {
+                    return;
+                }
+                let names: Vec<String> = self.vault.collection_names().iter().map(|s| s.to_string()).collect();
+                if let Some(idx) = self.vault_state.selected() {
+                    if let Some(name) = names.get(idx) {
+                        if name == "Reading List" {
+                            return;
+                        }
+                        let name = name.clone();
+                        let count = self.vault.papers_in(&name).len();
+                        self.confirm_message = format!(
+                            "Delete \"{}\" ({} papers)?",
+                            name, count
+                        );
+                        self.input_mode = InputMode::Confirm;
+                        let col = name.clone();
+                        self.confirm_action = Some(Box::new(move |app: &mut App| {
+                            app.vault.delete_collection(&col);
+                            app.set_status(format!("Deleted collection: {}", col));
+                            let new_len = app.vault.collections.len();
+                            if new_len == 0 {
+                                app.vault_state.select(None);
+                            } else if idx >= new_len {
+                                app.vault_state.select(Some(new_len - 1));
+                            }
+                        }));
+                    }
+                }
+            }
             Action::Dismiss => {
+                if self.input_mode == InputMode::CollectionPicker || self.input_mode == InputMode::NewCollection {
+                    self.input_mode = InputMode::Normal;
+                    self.set_status("Cancelled.");
+                    return;
+                }
                 if self.input_mode == InputMode::Filter {
                     self.filter_text.clear();
+                }
+                if self.input_mode == InputMode::Search {
+                    self.search_query.clear();
+                    self.search_results = None;
+                }
+                // Also clear search results when pressing Esc in Normal mode
+                if self.input_mode == InputMode::Normal && self.search_results.is_some() {
+                    self.search_query.clear();
+                    self.search_results = None;
+                    self.set_status("Back to paper feed.");
+                    return;
+                }
+                // Vault: Esc goes back to collections level
+                if self.input_mode == InputMode::Normal
+                    && self.feed_mode == FeedMode::Vault
+                    && matches!(self.vault_level, VaultLevel::Papers(_))
+                {
+                    self.vault_level = VaultLevel::Collections;
+                    self.vault_state = ListState::default();
+                    if !self.vault.collections.is_empty() {
+                        self.vault_state.select(Some(0));
+                    }
+                    self.article_scroll = 0;
+                    return;
                 }
                 if self.input_mode != InputMode::Normal {
                     self.input_mode = InputMode::Normal;
@@ -1010,6 +1300,7 @@ impl App {
         let pulse_at = match self.feed_mode {
             FeedMode::Papers => self.feed_loaded_at,
             FeedMode::Social => self.social_loaded_at,
+            FeedMode::Vault => None,
         };
         pulse_at
             .map(|t| self.tick_count.wrapping_sub(t) < LOAD_PULSE_TICKS)
@@ -1029,12 +1320,23 @@ impl App {
         }
     }
 
+    pub fn is_search_active(&self) -> bool {
+        self.search_results.is_some()
+    }
+
     pub fn selected_paper(&self) -> Option<&PaperEntry> {
-        let indices = self.filtered_paper_indices();
-        self.feed_state
-            .selected()
-            .and_then(|i| indices.get(i))
-            .and_then(|&orig| self.feed_items.get(orig))
+        if let Some(ref results) = self.search_results {
+            // In search mode: direct index into search results (capped by max_items)
+            self.search_state
+                .selected()
+                .and_then(|i| results.get(i))
+        } else {
+            let indices = self.filtered_paper_indices();
+            self.feed_state
+                .selected()
+                .and_then(|i| indices.get(i))
+                .and_then(|&orig| self.feed_items.get(orig))
+        }
     }
 
     pub fn selected_social_post(&self) -> Option<&SocialPost> {
@@ -1045,23 +1347,65 @@ impl App {
             .and_then(|&orig| self.social_items.get(orig))
     }
 
+    /// Get the selected vault paper's cached data as a PaperEntry (for article view).
+    pub fn selected_vault_paper(&self) -> Option<PaperEntry> {
+        if let VaultLevel::Papers(ref col) = self.vault_level {
+            let papers = self.vault.papers_in(col);
+            self.vault_state
+                .selected()
+                .and_then(|i| papers.get(i))
+                .and_then(|arxiv_id| {
+                    self.vault.paper_cache.get(*arxiv_id).map(|cached| PaperEntry {
+                        title: cached.title.clone(),
+                        authors: cached.authors.clone(),
+                        date: cached.date.clone(),
+                        domain: cached.domain.clone(),
+                        arxiv_id: Some(arxiv_id.to_string()),
+                        abstract_text: None,
+                        pdf_url: None,
+                    })
+                })
+        } else {
+            None
+        }
+    }
+
     pub fn selected_paper_meta(&self) -> Option<&PaperMeta> {
-        self.selected_paper()
-            .and_then(|p| p.arxiv_id.as_ref())
-            .and_then(|id| self.meta_cache.get(id))
+        self.active_paper()
+            .and_then(|p| p.arxiv_id)
+            .and_then(|id| self.meta_cache.get(&id))
+    }
+
+    /// Returns the active paper regardless of mode (Papers, Search, or Vault).
+    pub fn active_paper(&self) -> Option<PaperEntry> {
+        self.selected_paper().cloned().or_else(|| self.selected_vault_paper())
     }
 
     /// (1-indexed position, total count)
     pub fn feed_position(&self) -> (usize, usize) {
         match self.feed_mode {
             FeedMode::Papers => {
-                let total = self.filtered_paper_indices().len();
-                let sel = self.feed_state.selected().map_or(0, |i| i + 1);
-                (sel, total)
+                if let Some(ref results) = self.search_results {
+                    let total = results.len().min(self.max_items);
+                    let sel = self.search_state.selected().map_or(0, |i| i + 1);
+                    (sel, total)
+                } else {
+                    let total = self.filtered_paper_indices().len();
+                    let sel = self.feed_state.selected().map_or(0, |i| i + 1);
+                    (sel, total)
+                }
             }
             FeedMode::Social => {
                 let total = self.filtered_social_indices().len();
                 let sel = self.social_state.selected().map_or(0, |i| i + 1);
+                (sel, total)
+            }
+            FeedMode::Vault => {
+                let total = match &self.vault_level {
+                    VaultLevel::Collections => self.vault.collections.len(),
+                    VaultLevel::Papers(col) => self.vault.papers_in(col).len(),
+                };
+                let sel = self.vault_state.selected().map_or(0, |i| i + 1);
                 (sel, total)
             }
         }
@@ -1070,18 +1414,33 @@ impl App {
     // ── Scroll ───────────────────────────────────────────────
 
     fn scroll_down(&mut self) {
+        // Help scroll
+        if self.input_mode == InputMode::Help {
+            self.help_scroll = self.help_scroll.saturating_add(1);
+            return;
+        }
+        // Collection picker scroll
+        if self.input_mode == InputMode::CollectionPicker {
+            let len = self.vault.collections.len() + 1; // +1 for "New Collection..."
+            if len == 0 { return; }
+            let i = self.collection_picker_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+            self.collection_picker_state.select(Some(i));
+            return;
+        }
         match self.active_pane {
             ActivePane::Feed => match self.feed_mode {
                 FeedMode::Papers => {
-                    let len = self.filtered_paper_indices().len();
-                    if len == 0 {
-                        return;
+                    if let Some(ref results) = self.search_results {
+                        let len = results.len().min(self.max_items);
+                        if len == 0 { return; }
+                        let i = self.search_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                        self.search_state.select(Some(i));
+                    } else {
+                        let len = self.filtered_paper_indices().len();
+                        if len == 0 { return; }
+                        let i = self.feed_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                        self.feed_state.select(Some(i));
                     }
-                    let i = self
-                        .feed_state
-                        .selected()
-                        .map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
-                    self.feed_state.select(Some(i));
                 }
                 FeedMode::Social => {
                     let len = self.filtered_social_indices().len();
@@ -1093,6 +1452,15 @@ impl App {
                         .selected()
                         .map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
                     self.social_state.select(Some(i));
+                }
+                FeedMode::Vault => {
+                    let len = match &self.vault_level {
+                        VaultLevel::Collections => self.vault.collections.len(),
+                        VaultLevel::Papers(col) => self.vault.papers_in(col).len(),
+                    };
+                    if len == 0 { return; }
+                    let i = self.vault_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                    self.vault_state.select(Some(i));
                 }
             },
             ActivePane::Highlight => {
@@ -1105,18 +1473,33 @@ impl App {
     }
 
     fn scroll_up(&mut self) {
+        // Help scroll
+        if self.input_mode == InputMode::Help {
+            self.help_scroll = self.help_scroll.saturating_sub(1);
+            return;
+        }
+        // Collection picker scroll
+        if self.input_mode == InputMode::CollectionPicker {
+            let len = self.vault.collections.len() + 1; // +1 for "New Collection..."
+            if len == 0 { return; }
+            let i = self.collection_picker_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+            self.collection_picker_state.select(Some(i));
+            return;
+        }
         match self.active_pane {
             ActivePane::Feed => match self.feed_mode {
                 FeedMode::Papers => {
-                    let len = self.filtered_paper_indices().len();
-                    if len == 0 {
-                        return;
+                    if let Some(ref results) = self.search_results {
+                        let len = results.len().min(self.max_items);
+                        if len == 0 { return; }
+                        let i = self.search_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                        self.search_state.select(Some(i));
+                    } else {
+                        let len = self.filtered_paper_indices().len();
+                        if len == 0 { return; }
+                        let i = self.feed_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                        self.feed_state.select(Some(i));
                     }
-                    let i = self
-                        .feed_state
-                        .selected()
-                        .map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
-                    self.feed_state.select(Some(i));
                 }
                 FeedMode::Social => {
                     let len = self.filtered_social_indices().len();
@@ -1128,6 +1511,15 @@ impl App {
                         .selected()
                         .map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
                     self.social_state.select(Some(i));
+                }
+                FeedMode::Vault => {
+                    let len = match &self.vault_level {
+                        VaultLevel::Collections => self.vault.collections.len(),
+                        VaultLevel::Papers(col) => self.vault.papers_in(col).len(),
+                    };
+                    if len == 0 { return; }
+                    let i = self.vault_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                    self.vault_state.select(Some(i));
                 }
             },
             ActivePane::Highlight => {
@@ -1147,6 +1539,9 @@ impl App {
                 }
                 FeedMode::Social if !self.filtered_social_indices().is_empty() => {
                     self.social_state.select(Some(0));
+                }
+                FeedMode::Vault => {
+                    self.vault_state.select(Some(0));
                 }
                 _ => {}
             },
@@ -1170,6 +1565,15 @@ impl App {
                         self.social_state.select(Some(len - 1));
                     }
                 }
+                FeedMode::Vault => {
+                    let len = match &self.vault_level {
+                        VaultLevel::Collections => self.vault.collections.len(),
+                        VaultLevel::Papers(col) => self.vault.papers_in(col).len(),
+                    };
+                    if len > 0 {
+                        self.vault_state.select(Some(len - 1));
+                    }
+                }
             },
             ActivePane::Highlight => self.highlight_scroll = u16::MAX / 2,
             ActivePane::Article => self.article_scroll = u16::MAX / 2,
@@ -1182,12 +1586,25 @@ impl App {
         self.status_message = Some((msg.into(), self.tick_count));
     }
 
+    fn bookmark_to_collection(&mut self, collection: &str) {
+        let Some(paper) = self.active_paper() else {
+            self.set_status("No paper selected.");
+            return;
+        };
+        let Some(ref arxiv_id) = paper.arxiv_id else {
+            self.set_status("Paper has no arxiv_id.");
+            return;
+        };
+        self.vault.add_paper(collection, arxiv_id, &paper);
+        self.set_status(format!("Bookmarked to {}", collection));
+    }
+
     fn spawn_implementation(&mut self) {
         if self.llm_providers.is_empty() {
             self.set_status("No LLM provider configured. Set API key in config.toml");
             return;
         }
-        let Some(paper) = self.selected_paper() else {
+        let Some(paper) = self.active_paper() else {
             self.set_status("No paper selected.");
             return;
         };
@@ -1230,7 +1647,7 @@ impl App {
     }
 
     fn do_scaffold_generate(&mut self) {
-        let Some(paper) = self.selected_paper() else {
+        let Some(paper) = self.active_paper() else {
             return;
         };
         let arxiv_id = paper.arxiv_id.clone().unwrap_or_default();
@@ -1252,7 +1669,7 @@ impl App {
     }
 
     fn export_to_obsidian(&mut self) {
-        let Some(paper) = self.selected_paper().cloned() else {
+        let Some(paper) = self.active_paper() else {
             self.set_status("No paper selected.");
             return;
         };
@@ -1295,7 +1712,7 @@ impl App {
     }
 
     fn do_export_now(&mut self, force: bool) {
-        let Some(paper) = self.selected_paper().cloned() else {
+        let Some(paper) = self.active_paper() else {
             return;
         };
         let meta = self.selected_paper_meta().cloned();
@@ -1352,7 +1769,7 @@ impl App {
             self.set_status("No LLM provider configured.");
             return;
         }
-        let Some(paper) = self.selected_paper() else {
+        let Some(paper) = self.active_paper() else {
             return;
         };
         let arxiv_id = match paper.arxiv_id.as_ref() {
@@ -1378,6 +1795,45 @@ impl App {
     }
 
     fn open_in_browser(&mut self) {
+        // Vault: Enter drills into collection or opens paper
+        if self.feed_mode == FeedMode::Vault {
+            match &self.vault_level {
+                VaultLevel::Collections => {
+                    let names: Vec<String> = self.vault.collection_names().iter().map(|s| s.to_string()).collect();
+                    if let Some(idx) = self.vault_state.selected() {
+                        if let Some(name) = names.get(idx) {
+                            self.vault_level = VaultLevel::Papers(name.clone());
+                            self.vault_state = ListState::default();
+                            let paper_count = self.vault.papers_in(name).len();
+                            if paper_count > 0 {
+                                self.vault_state.select(Some(0));
+                            }
+                            self.article_scroll = 0;
+                            return;
+                        }
+                    }
+                    return;
+                }
+                VaultLevel::Papers(col) => {
+                    // Open selected paper in browser
+                    let papers = self.vault.papers_in(col);
+                    if let Some(idx) = self.vault_state.selected() {
+                        if let Some(arxiv_id) = papers.get(idx) {
+                            let url = format!("https://arxiv.org/abs/{}", arxiv_id);
+                            self.set_status(format!("Opening: {}", url));
+                            #[cfg(target_os = "macos")]
+                            let _ = std::process::Command::new("open").arg(&url).spawn();
+                            #[cfg(target_os = "linux")]
+                            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                            #[cfg(target_os = "windows")]
+                            let _ = std::process::Command::new("cmd").args(["/C", "start", &url]).spawn();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
         let url = match self.active_pane {
             ActivePane::Highlight => {
                 // Open spotlight paper on HF
@@ -1396,6 +1852,7 @@ impl App {
                         .map(|p| p.url.clone())
                         .filter(|u| !u.is_empty())
                 }
+                FeedMode::Vault => None, // handled above
             }
         };
 

@@ -2,14 +2,15 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
+use crate::app::App;
 use crate::ui::Theme;
 
-pub fn render(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(58, 30, area);
+pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let popup = centered_rect(58, 32, area);
     frame.render_widget(Clear, popup);
 
     let sep = "\u{2500}".repeat(52);
@@ -37,14 +38,18 @@ pub fn render(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled(format!("  {}", sep), Theme::dim())),
         help_line("  i", "Spawn implementation scaffold"),
         help_line("  o", "Export to Obsidian vault"),
-        help_line("  Enter", "Open in browser"),
+        help_line("  b", "Bookmark paper to Reading List"),
+        help_line("  B", "Bookmark to collection..."),
+        help_line("  d", "Remove paper (vault mode)"),
+        help_line("  Enter", "Open in browser / drill into"),
         help_line("  m", "Cycle summary mode"),
         help_line("  M", "Generate LLM summary"),
         help_line("  L", "Cycle LLM provider"),
         help_line("  p", "Cycle research profile"),
         help_line("  r", "Refresh feed"),
-        help_line("  f", "Toggle paper/social feed"),
+        help_line("  f", "Cycle feed (papers/social/vault)"),
         help_line("  /", "Filter feed (type to search)"),
+        help_line("  S", "Search papers (HuggingFace)"),
         help_line("  s", "Cycle sort (papers only)"),
         help_line("  t", "Cycle time window (24h/7d/30d/all)"),
         help_line("  n", "Cycle max items (10/25/50/75/100)"),
@@ -57,7 +62,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
         )),
         Line::from(Span::styled(format!("  {}", sep), Theme::dim())),
         help_line("  ?", "Toggle this help"),
-        help_line("  Esc", "Dismiss / close"),
+        help_line("  Esc", "Dismiss / close / back"),
         help_line("  q", "Quit"),
         Line::from(""),
     ];
@@ -77,7 +82,10 @@ pub fn render(frame: &mut Frame, area: Rect) {
         )
         .style(Style::default().bg(Theme::DARK_BG));
 
-    let paragraph = Paragraph::new(lines).block(block);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.help_scroll, 0));
     frame.render_widget(paragraph, popup);
 }
 

@@ -29,6 +29,7 @@ pub enum NetworkAction {
         provider_idx: usize,
     },
     FetchFullText(String), // arxiv_id
+    SearchPapers(String),  // query
 }
 
 pub enum NetworkEvent {
@@ -39,6 +40,7 @@ pub enum NetworkEvent {
     SummaryLoaded { arxiv_id: String, mode: String, text: String },
     ScaffoldLoaded { arxiv_id: String, text: String },
     FullTextLoaded { arxiv_id: String, text: String },
+    SearchResultsLoaded(Vec<PaperEntry>),
     Error(String),
 }
 
@@ -75,17 +77,16 @@ pub fn spawn_worker(
                                 let _ = tx.send(NetworkEvent::FeedLoaded(papers));
                             }
                             Ok(_) => {
-                                // Empty result — fall back to mock
                                 let _ = tx.send(NetworkEvent::Error(
-                                    "ArXiv returned no papers, using mock data".into(),
+                                    "ArXiv returned no papers for this profile.".into(),
                                 ));
-                                let papers = mock_papers_for_profile(&profile);
-                                let _ = tx.send(NetworkEvent::FeedLoaded(papers));
+                                let _ = tx.send(NetworkEvent::FeedLoaded(Vec::new()));
                             }
                             Err(e) => {
-                                let _ = tx.send(NetworkEvent::Error(e));
-                                let papers = mock_papers_for_profile(&profile);
-                                let _ = tx.send(NetworkEvent::FeedLoaded(papers));
+                                let _ = tx.send(NetworkEvent::Error(
+                                    format!("Feed fetch failed: {}", e),
+                                ));
+                                let _ = tx.send(NetworkEvent::FeedLoaded(Vec::new()));
                             }
                         }
                     }
@@ -261,94 +262,19 @@ pub fn spawn_worker(
                             }
                         }
                     }
+
+                    NetworkAction::SearchPapers(query) => {
+                        match providers::hf_search::search_papers(&client, &query).await {
+                            Ok(papers) => {
+                                let _ = tx.send(NetworkEvent::SearchResultsLoaded(papers));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(NetworkEvent::Error(format!("Search: {}", e)));
+                            }
+                        }
+                    }
                 }
             });
         }
     });
-}
-
-// ── Mock Data (ArXiv fallback) ──────────────────────────────
-
-fn mock_papers_for_profile(profile: &Profile) -> Vec<PaperEntry> {
-    let is_rl = profile.arxiv_categories.iter().any(|c| c == "cs.AI");
-
-    if is_rl {
-        vec![
-            p("Multi-Agent PPO with Shared Value Decomposition",
-              "Sunehag, P. et al.", "2026-04-04", "MARL",
-              "2604.01001",
-              "We extend PPO to the multi-agent setting via a shared \
-               value decomposition network, achieving SOTA on StarCraft \
-               micromanagement benchmarks without centralized critics."),
-            p("TD3 with Hindsight Experience Replay Revisited",
-              "Andrychowicz, M. et al.", "2026-04-02", "RL",
-              "2604.00892",
-              "Combining TD3's clipped double-Q with hindsight relabeling \
-               yields 40% faster convergence on sparse-reward robotics tasks."),
-            p("Offline RL via Conservative Q-Learning at Scale",
-              "Kumar, A. et al.", "2026-03-30", "RL",
-              "2603.18221",
-              "Scaling CQL to 10B-parameter transformers on D4RL datasets, \
-               demonstrating that offline RL benefits from the same scaling \
-               laws observed in language modeling."),
-            p("DDPG-Based Continuous Control in MuJoCo Envs",
-              "Lillicrap, T. et al.", "2026-03-27", "RL",
-              "2603.16110",
-              "A modernized DDPG baseline with layer normalization and \
-               distributional critics that matches SAC on continuous \
-               control without entropy tuning."),
-            p("Decision Transformer Meets World Models",
-              "Chen, L. et al.", "2026-03-22", "RL",
-              "2603.13882",
-              "Integrating a learned latent world model into the Decision \
-               Transformer architecture for model-based offline planning \
-               in Atari and MuJoCo."),
-        ]
-    } else {
-        vec![
-            p("Attention Is All You Need v2: Sparse Mixture Routing",
-              "Vaswani, A. et al.", "2026-04-05", "NLP",
-              "2604.02100",
-              "Replacing dense attention with a top-k sparse mixture of \
-               attention heads reduces FLOPs by 60% while matching dense \
-               Transformer quality on WMT and GLUE."),
-            p("TimesFM: Foundation Model for Time-Series",
-              "Google Research", "2026-04-03", "Forecasting",
-              "2604.01500",
-              "A decoder-only foundation model pre-trained on 100B real-world \
-               time points achieves zero-shot forecasting rivaling supervised \
-               baselines across energy, retail, and finance domains."),
-            p("Generative Flow Networks for Discrete Optimization",
-              "Bengio, Y. et al.", "2026-04-01", "GFlowNets",
-              "2604.00330",
-              "GFlowNets trained with trajectory balance learn diverse, \
-               high-reward solutions to combinatorial optimization problems \
-               including molecular design and max-SAT."),
-            p("RLHF Without Reward Models: Direct Preference Opt.",
-              "Rafailov, R. et al.", "2026-03-28", "RL/NLP",
-              "2603.17220",
-              "DPO eliminates the reward model entirely by optimizing a \
-               closed-form policy objective directly on preference pairs, \
-               matching RLHF with 3x less compute."),
-            p("Mamba-2: Linear-Time Sequence Modeling at Scale",
-              "Gu, A., Dao, T.", "2026-03-25", "Arch",
-              "2603.15400",
-              "A structured state-space model with hardware-aware selective \
-               scan kernels achieving Transformer-level quality at linear \
-               time complexity on sequences up to 1M tokens."),
-        ]
-    }
-}
-
-fn p(title: &str, authors: &str, date: &str, domain: &str,
-     arxiv_id: &str, abstract_text: &str) -> PaperEntry {
-    PaperEntry {
-        title: title.into(),
-        authors: authors.into(),
-        date: date.into(),
-        domain: domain.into(),
-        arxiv_id: Some(arxiv_id.into()),
-        abstract_text: Some(abstract_text.into()),
-        pdf_url: Some(format!("https://arxiv.org/pdf/{}", arxiv_id)),
-    }
 }

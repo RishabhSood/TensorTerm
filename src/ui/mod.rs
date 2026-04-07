@@ -59,11 +59,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Help popup overlay (rendered last, on top)
     if app.input_mode == InputMode::Help {
-        widgets::help::render(frame, area);
+        widgets::help::render(frame, area, app);
     }
 
-    // Modal overlays (confirm, scaffold prompt)
-    if matches!(app.input_mode, InputMode::Confirm | InputMode::ScaffoldPrompt) {
+    // Modal overlays (confirm, scaffold prompt, collection picker, new collection)
+    if matches!(app.input_mode, InputMode::Confirm | InputMode::ScaffoldPrompt | InputMode::CollectionPicker | InputMode::NewCollection) {
         widgets::modal::render(frame, area, app);
     }
 }

@@ -24,6 +24,17 @@ pub struct GeneralConfig {
     pub max_feed_items: usize,
     #[serde(default)]
     pub enable_semantic_scholar: bool,
+    #[serde(default = "default_implementations_dir")]
+    pub implementations_dir: String,
+}
+
+fn default_implementations_dir() -> String {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".tensor_term")
+        .join("implementations")
+        .to_string_lossy()
+        .to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +235,7 @@ impl Default for GeneralConfig {
             tick_rate_ms: 80,
             max_feed_items: 50,
             enable_semantic_scholar: false,
+            implementations_dir: default_implementations_dir(),
         }
     }
 }
@@ -279,6 +291,7 @@ default_profile = "generative"
 tick_rate_ms = 80
 max_feed_items = 50
 # enable_semantic_scholar = true  # off by default (rate limited)
+# implementations_dir = "~/.tensor_term/implementations"  # where scaffolds are saved
 
 # ── Research Profiles ─────────────────────────────
 

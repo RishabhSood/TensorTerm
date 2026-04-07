@@ -9,6 +9,7 @@ mod obsidian;
 mod providers;
 mod scaffold_index;
 mod ui;
+mod vault;
 
 use std::io;
 use std::sync::Arc;

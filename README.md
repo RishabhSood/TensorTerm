@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/built_with-Rust-e43717?style=for-the-badge&logo=rust&logoColor=white" />
   <img src="https://img.shields.io/badge/TUI-ratatui-00FFFF?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/version-0.1.0-39FF14?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/version-0.1.1-39FF14?style=for-the-badge" />
   <img src="https://img.shields.io/badge/license-MIT-FF00FF?style=for-the-badge" />
 </p>
 
@@ -40,6 +40,8 @@ It goes beyond reading: you can generate LLM-powered summaries in multiple modes
 - **Implementation scaffolding** — generate a full project roadmap from any paper with one keypress
 - **Obsidian export** — rich markdown notes with YAML frontmatter, citations, summaries, and scaffolds
 - **Social feed** — track Karpathy, LeCun, Altman, and others via RSS/Atom and Nitter
+- **Paper search** — search the HuggingFace papers index directly from the terminal
+- **Paper vault** — bookmark papers into named collections, browse and manage them in a dedicated view
 - **Zero-credit quickstart** — run with local Ollama models, no API keys needed
 
 ---
@@ -51,6 +53,14 @@ It goes beyond reading: you can generate LLM-powered summaries in multiple modes
 ```sh
 brew tap RishabhSood/tap
 brew install tensorterm
+```
+
+### Windows
+
+Download `tensorterm-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/RishabhSood/TensorTerm/releases), extract, and add to your `PATH`. Or install from source:
+
+```sh
+cargo install --git https://github.com/RishabhSood/TensorTerm.git
 ```
 
 ### From source
@@ -152,9 +162,10 @@ Three panes: **Feed** (top-left), **Spotlight** (bottom-left), **Article** (righ
 
 | Key | Action |
 |-----|--------|
-| `f` | Toggle between Paper feed and Social feed |
+| `f` | Cycle feed mode: Papers → Social → Vault |
 | `/` | Start filter — type to live-search papers/posts |
-| `Esc` | Clear filter / dismiss overlay |
+| `S` | Search HuggingFace papers (Papers mode only) |
+| `Esc` | Clear filter / dismiss overlay / back (vault) |
 | `s` | Cycle sort order: Date → Citations → Title (papers only) |
 | `t` | Cycle time window: 24h → 7d → 30d → All |
 | `n` | Cycle max items: 10 → 25 → 50 → 75 → 100 |
@@ -165,7 +176,10 @@ Three panes: **Feed** (top-left), **Spotlight** (bottom-left), **Article** (righ
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Open paper in browser (ArXiv page) |
+| `Enter` | Open paper in browser / drill into vault collection |
+| `b` | Bookmark paper to Reading List |
+| `B` | Bookmark to a specific collection (picker modal) |
+| `d` | Remove paper from collection / delete collection (vault mode) |
 | `m` | Cycle summary mode: Off → TL;DR → ELI5 → Technical → Key Findings → Research Gaps |
 | `M` | Generate LLM summary (for the active summary mode) |
 | `L` | Cycle LLM provider (if multiple configured) |
@@ -377,6 +391,53 @@ nitter_instance = "https://nitter.net"
 
 ---
 
+## Paper Search
+
+Press `S` in Papers mode to search the HuggingFace papers index. Type your query and press `Enter` — results appear in the feed pane with full article view support. Press `Esc` to return to the regular feed.
+
+Search results support all the same actions as the regular feed: metadata viewing, LLM summaries, scaffolding, Obsidian export, and bookmarking.
+
+---
+
+## Paper Vault
+
+The vault is a local bookmarking system for organizing papers into named collections. Press `f` twice to switch to the Vault view.
+
+### Bookmarking papers
+
+- **`b`** — quickly save the current paper to your **Reading List** (default collection)
+- **`B`** — open a collection picker modal to choose a specific collection, or create a new one
+
+Bookmark keys work in Papers mode, Search results, and Vault mode (to add a paper to additional collections).
+
+### Browsing the vault
+
+The vault has two levels:
+
+1. **Collections level** — shows all your collections with paper counts. Press `Enter` to drill into one.
+2. **Papers level** — shows papers in the selected collection with full article view. Press `Esc` to go back.
+
+### Managing collections
+
+- A **Reading List** collection is created by default and cannot be deleted
+- Create new collections via the `B` picker modal — select **+ New Collection...** at the bottom
+- Collection names are validated for uniqueness (case-insensitive) and cannot be blank
+- Delete a collection with `d` at the collections level (with confirmation)
+- Remove a paper from a collection with `d` at the papers level (with confirmation)
+
+### Full feature parity
+
+Papers in the vault support the same actions as the regular feed:
+- LLM summaries (`m` / `M`), implementation scaffolding (`i`), Obsidian export (`o`)
+- Metadata fetching (HuggingFace upvotes, keywords, Semantic Scholar citations)
+- The article view shows which collections a paper belongs to (`Saved in  Reading List, To Implement`)
+
+### Persistence
+
+The vault is stored at `~/.config/tensor_term/vault.json` and persists across sessions. Paper metadata (title, authors, date, domain) is cached at bookmark time so the vault loads instantly without network calls.
+
+---
+
 ## Configuration Reference
 
 The config lives at `~/.config/tensor_term/config.toml` (respects `XDG_CONFIG_HOME`).
@@ -399,6 +460,7 @@ tensorterm --edit-config
 | `general` | `enable_semantic_scholar` | `false` | Enable citation fetching (S2 is rate-limited) |
 | `llm` | `active` | `"anthropic"` | Default LLM provider |
 | `obsidian` | `vault_path` | `""` | Path to your Obsidian vault (supports `~`) |
+| `general` | `implementations_dir` | `~/.tensor_term/implementations` | Directory for generated scaffolds |
 | `social` | `nitter_instance` | `"https://nitter.net"` | Nitter proxy for Twitter feeds |
 
 A fully commented default config is generated on first run — just open it and customize.
@@ -442,6 +504,7 @@ src/
 ├── network.rs           Async background worker (tokio)
 ├── obsidian.rs          Markdown export to Obsidian vault
 ├── scaffold_index.rs    JSON index of generated scaffolds
+├── vault.rs             Paper vault — bookmarks, collections, JSON persistence
 ├── logger.rs            Debug file logger
 ├── llm/
 │   ├── mod.rs           Provider trait + registry + prompts
@@ -451,6 +514,7 @@ src/
 │   ├── arxiv.rs         ArXiv Atom XML feed
 │   ├── huggingface.rs   HF daily papers + spotlight
 │   ├── hf_papers.rs     HF paper metadata API
+│   ├── hf_search.rs     HF paper search API
 │   ├── semantic_scholar.rs  S2 Graph API (citations)
 │   └── social.rs        RSS/Atom + Nitter social feed
 └── ui/
@@ -459,15 +523,32 @@ src/
     ├── markdown.rs      Markdown-to-ratatui renderer
     └── widgets/
         ├── header.rs    Animated banner
-        ├── feed.rs      Paper/social feed list
+        ├── feed.rs      Paper/social/vault feed list
         ├── highlight.rs HF spotlight pane
         ├── article.rs   Paper detail + metadata
         ├── status_bar.rs Bottom status bar
-        ├── help.rs      Keybinding overlay
-        └── modal.rs     Confirmation dialogs
+        ├── help.rs      Scrollable keybinding overlay
+        └── modal.rs     Confirmation dialogs, collection picker
 ```
 
 Event handling uses a dual-channel architecture: crossterm key/mouse events on an OS thread via `std::sync::mpsc`, and async network results via `tokio::sync::mpsc`. Network events are drained non-blocking on each 80ms tick.
+
+---
+
+## Changelog
+
+### v0.1.1
+
+**New Features**
+- **Paper Search** — press `S` to search the HuggingFace papers index directly from the feed
+- **Paper Vault** — bookmark papers into named collections with `b` / `B`, browse in a dedicated vault view (`f` to cycle), full action parity (summaries, scaffolds, Obsidian export)
+- **Collection management** — create, delete, and browse named collections; Reading List is the default and protected from deletion
+- **Scrollable help** — the `?` help overlay now scrolls with `j` / `k` to accommodate new keybindings
+- **Collections display** — article view shows which collections a paper belongs to
+
+**Fixes**
+- **Scaffold output directory** — now correctly reads `implementations_dir` from config instead of hardcoded default
+- **Feed error handling** — ArXiv fetch failures show a clear error in the status bar instead of silently loading misleading mock data
 
 ---
 
