@@ -1,7 +1,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/built_with-Rust-e43717?style=for-the-badge&logo=rust&logoColor=white" />
   <img src="https://img.shields.io/badge/TUI-ratatui-00FFFF?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/version-0.1.1-39FF14?style=for-the-badge" />
+  <img src="https://img.shields.io/github/v/tag/RishabhSood/TensorTerm?label=version&style=for-the-badge&color=39FF14" />
+  <img src="https://img.shields.io/github/actions/workflow/status/RishabhSood/TensorTerm/release.yml?style=for-the-badge&label=build" />
   <img src="https://img.shields.io/badge/license-MIT-FF00FF?style=for-the-badge" />
 </p>
 
