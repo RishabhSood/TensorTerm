@@ -3,6 +3,7 @@ pub mod arxiv_html;
 pub mod hf_papers;
 pub mod hf_search;
 pub mod huggingface;
+pub mod news;
 pub mod semantic_scholar;
 pub mod social;
 

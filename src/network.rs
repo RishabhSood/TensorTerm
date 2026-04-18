@@ -3,10 +3,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::app::{CitingPaper, PaperEntry, PaperMeta, MetaFetchStatus};
-use crate::config::{Profile, SocialFeedConfig};
+use crate::config::{NewsFeedConfig, Profile, SocialFeedConfig};
 use crate::llm::{self, ChatMessage, LlmProvider};
 use crate::providers;
 use crate::providers::huggingface::HfSpotlight;
+use crate::providers::news::NewsArticle;
 use crate::providers::social::SocialPost;
 
 // ── Channel Messages ─────────────────────────────────────────
@@ -16,6 +17,8 @@ pub enum NetworkAction {
     FetchHfSpotlight,
     FetchPaperMeta(String, bool), // arxiv_id, enable_s2
     FetchSocialFeed(Vec<SocialFeedConfig>, String),
+    FetchNewsFeed(Vec<NewsFeedConfig>),
+    FetchNewsArticle(String), // url
     Summarize {
         arxiv_id: String,
         mode: String,
@@ -37,6 +40,8 @@ pub enum NetworkEvent {
     HfSpotlightLoaded(HfSpotlight),
     PaperMetaLoaded { arxiv_id: String, meta: PaperMeta },
     SocialFeedLoaded(Vec<SocialPost>),
+    NewsFeedLoaded(Vec<NewsArticle>),
+    NewsArticleLoaded { url: String, markdown: String },
     SummaryLoaded { arxiv_id: String, mode: String, text: String },
     ScaffoldLoaded { arxiv_id: String, text: String },
     FullTextLoaded { arxiv_id: String, text: String },
@@ -192,6 +197,28 @@ pub fn spawn_worker(
                             }
                             Err(e) => {
                                 let _ = tx.send(NetworkEvent::Error(format!("Social: {}", e)));
+                            }
+                        }
+                    }
+
+                    NetworkAction::FetchNewsFeed(feeds) => {
+                        match providers::news::fetch_news_feeds(&client, &feeds).await {
+                            Ok(articles) => {
+                                let _ = tx.send(NetworkEvent::NewsFeedLoaded(articles));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(NetworkEvent::Error(format!("News: {}", e)));
+                            }
+                        }
+                    }
+
+                    NetworkAction::FetchNewsArticle(url) => {
+                        match providers::news::fetch_article_markdown(&client, &url).await {
+                            Ok(markdown) => {
+                                let _ = tx.send(NetworkEvent::NewsArticleLoaded { url, markdown });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(NetworkEvent::Error(format!("News article: {}", e)));
                             }
                         }
                     }

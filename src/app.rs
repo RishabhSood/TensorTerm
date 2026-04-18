@@ -8,6 +8,7 @@ use crate::config::{Config, Profile};
 use crate::llm::LlmProvider;
 use crate::network::{NetworkAction, NetworkEvent};
 use crate::providers::huggingface::HfSpotlight;
+use crate::providers::news::NewsArticle;
 use crate::providers::social::SocialPost;
 use crate::scaffold_index::ScaffoldIndex;
 use crate::vault::Vault;
@@ -67,6 +68,7 @@ pub enum Action {
     ToggleHelp,
     Dismiss,
     ToggleFeedMode,
+    ToggleVault,
     StartFilter,
     CycleSort,
     CycleTimeWindow,
@@ -101,6 +103,7 @@ pub enum FeedMode {
     Papers,
     Social,
     Vault,
+    News,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +233,7 @@ pub enum LoadingTask {
     HfSpotlight,
     PaperMeta(String),
     SocialFeed,
+    NewsFeed,
     LlmSummary(String),
     LlmScaffold(String),
 }
@@ -366,9 +370,17 @@ pub struct App {
 
     // Social feed
     pub feed_mode: FeedMode,
+    pub previous_feed_mode: FeedMode,
     pub social_items: Vec<SocialPost>,
     pub social_state: ListState,
     pub social_loaded_at: Option<u64>,
+
+    // News feed
+    pub news_items: Vec<NewsArticle>,
+    pub news_state: ListState,
+    pub news_loaded_at: Option<u64>,
+    pub news_text_cache: HashMap<String, String>, // url → full markdown
+    pending_news_export: Option<NewsArticle>,
 
     // Filter
     pub filter_text: String,
@@ -471,9 +483,15 @@ impl App {
             meta_cache: HashMap::new(),
             hf_spotlight: None,
             feed_mode: FeedMode::Papers,
+            previous_feed_mode: FeedMode::Papers,
             social_items: Vec::new(),
             social_state: ListState::default(),
             social_loaded_at: None,
+            news_items: Vec::new(),
+            news_state: ListState::default(),
+            news_loaded_at: None,
+            news_text_cache: HashMap::new(),
+            pending_news_export: None,
             filter_text: String::new(),
             search_query: String::new(),
             search_results: None,
@@ -609,6 +627,20 @@ impl App {
                     self.social_loaded_at = Some(self.tick_count);
                     if !self.social_items.is_empty() {
                         self.social_state.select(Some(0));
+                    }
+                }
+                NetworkEvent::NewsFeedLoaded(articles) => {
+                    self.news_items = articles;
+                    self.loading.remove(&LoadingTask::NewsFeed);
+                    self.news_loaded_at = Some(self.tick_count);
+                    if !self.news_items.is_empty() {
+                        self.news_state.select(Some(0));
+                    }
+                }
+                NetworkEvent::NewsArticleLoaded { url, markdown } => {
+                    self.news_text_cache.insert(url.clone(), markdown);
+                    if let Some(article) = self.pending_news_export.take() {
+                        self.do_news_export_now(&article);
                     }
                 }
                 NetworkEvent::SearchResultsLoaded(papers) => {
@@ -753,6 +785,7 @@ impl App {
                 KeyCode::Char('p') => Some(Action::CycleProfile),
                 KeyCode::Char('r') => Some(Action::RefreshFeed),
                 KeyCode::Char('f') => Some(Action::ToggleFeedMode),
+                KeyCode::Char('v') => Some(Action::ToggleVault),
                 KeyCode::Char('/') => Some(Action::StartFilter),
                 KeyCode::Char('s') => Some(Action::CycleSort),
                 KeyCode::Char('S') => Some(Action::StartSearch),
@@ -800,7 +833,12 @@ impl App {
             Action::ExportToObsidian => self.export_to_obsidian(),
             Action::OpenInBrowser => self.open_in_browser(),
             Action::CycleProfile => self.cycle_profile(),
-            Action::RefreshFeed => self.request_feed_refresh(),
+            Action::RefreshFeed => match self.feed_mode {
+                FeedMode::Papers => self.request_feed_refresh(),
+                FeedMode::Social => self.request_social_refresh(),
+                FeedMode::News => self.request_news_refresh(),
+                FeedMode::Vault => self.set_status("Vault is local — nothing to refresh."),
+            },
             Action::ToggleHelp => {
                 self.input_mode = match self.input_mode {
                     InputMode::Help => InputMode::Normal,
@@ -813,22 +851,33 @@ impl App {
             Action::ToggleFeedMode => {
                 self.feed_mode = match self.feed_mode {
                     FeedMode::Papers => FeedMode::Social,
-                    FeedMode::Social => FeedMode::Vault,
-                    FeedMode::Vault => FeedMode::Papers,
+                    FeedMode::Social => FeedMode::News,
+                    FeedMode::News => FeedMode::Papers,
+                    FeedMode::Vault => FeedMode::Papers, // exit vault on f
                 };
                 self.article_scroll = 0;
                 self.set_status(match self.feed_mode {
                     FeedMode::Papers => "Feed \u{2192} Papers",
                     FeedMode::Social => "Feed \u{2192} Social",
+                    FeedMode::News => "Feed \u{2192} News",
                     FeedMode::Vault => "Feed \u{2192} Vault",
                 });
+            }
+            Action::ToggleVault => {
                 if self.feed_mode == FeedMode::Vault {
+                    self.feed_mode = self.previous_feed_mode;
+                    self.set_status("Vault closed");
+                } else {
+                    self.previous_feed_mode = self.feed_mode;
+                    self.feed_mode = FeedMode::Vault;
                     self.vault_level = VaultLevel::Collections;
                     self.vault_state = ListState::default();
                     if !self.vault.collections.is_empty() {
                         self.vault_state.select(Some(0));
                     }
+                    self.set_status("Vault");
                 }
+                self.article_scroll = 0;
             }
             Action::StartFilter => {
                 self.input_mode = InputMode::Filter;
@@ -1075,18 +1124,22 @@ impl App {
                     self.set_status("Back to paper feed.");
                     return;
                 }
-                // Vault: Esc goes back to collections level
-                if self.input_mode == InputMode::Normal
-                    && self.feed_mode == FeedMode::Vault
-                    && matches!(self.vault_level, VaultLevel::Papers(_))
-                {
-                    self.vault_level = VaultLevel::Collections;
-                    self.vault_state = ListState::default();
-                    if !self.vault.collections.is_empty() {
-                        self.vault_state.select(Some(0));
+                // Vault: Esc drills back. Papers level → Collections, Collections → exit Vault.
+                if self.input_mode == InputMode::Normal && self.feed_mode == FeedMode::Vault {
+                    if matches!(self.vault_level, VaultLevel::Papers(_)) {
+                        self.vault_level = VaultLevel::Collections;
+                        self.vault_state = ListState::default();
+                        if !self.vault.collections.is_empty() {
+                            self.vault_state.select(Some(0));
+                        }
+                        self.article_scroll = 0;
+                        return;
+                    } else {
+                        // Already at collections level → exit vault back to previous feed
+                        self.feed_mode = self.previous_feed_mode;
+                        self.article_scroll = 0;
+                        return;
                     }
-                    self.article_scroll = 0;
-                    return;
                 }
                 if self.input_mode != InputMode::Normal {
                     self.input_mode = InputMode::Normal;
@@ -1142,6 +1195,12 @@ impl App {
         let _ = self
             .net_tx
             .try_send(NetworkAction::FetchSocialFeed(feeds, nitter));
+    }
+
+    pub fn request_news_refresh(&mut self) {
+        let feeds = self.config.news.feeds.clone();
+        self.loading.insert(LoadingTask::NewsFeed);
+        let _ = self.net_tx.try_send(NetworkAction::FetchNewsFeed(feeds));
     }
 
     // ── Dynamic Spotlight ────────────────────────────────────
@@ -1290,6 +1349,38 @@ impl App {
         indices
     }
 
+    /// Get filtered news article indices.
+    pub fn filtered_news_indices(&self) -> Vec<usize> {
+        let query = self.filter_text.to_lowercase();
+        let cutoff = self.time_window.cutoff_date();
+
+        let mut indices: Vec<usize> = self.news_items
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                if let Some(ref cut) = cutoff {
+                    let iso = normalize_date_to_iso(&a.published);
+                    if !iso.is_empty() && iso < *cut {
+                        return false;
+                    }
+                }
+                if !query.is_empty() {
+                    let matches = a.source_name.to_lowercase().contains(&query)
+                        || a.title.to_lowercase().contains(&query)
+                        || a.summary.to_lowercase().contains(&query);
+                    if !matches {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        indices.truncate(self.max_items);
+        indices
+    }
+
     // ── Queries ──────────────────────────────────────────────
 
     pub fn is_loading(&self) -> bool {
@@ -1301,6 +1392,7 @@ impl App {
             FeedMode::Papers => self.feed_loaded_at,
             FeedMode::Social => self.social_loaded_at,
             FeedMode::Vault => None,
+            FeedMode::News => self.news_loaded_at,
         };
         pulse_at
             .map(|t| self.tick_count.wrapping_sub(t) < LOAD_PULSE_TICKS)
@@ -1345,6 +1437,14 @@ impl App {
             .selected()
             .and_then(|i| indices.get(i))
             .and_then(|&orig| self.social_items.get(orig))
+    }
+
+    pub fn selected_news_article(&self) -> Option<&NewsArticle> {
+        let indices = self.filtered_news_indices();
+        self.news_state
+            .selected()
+            .and_then(|i| indices.get(i))
+            .and_then(|&orig| self.news_items.get(orig))
     }
 
     /// Get the selected vault paper's cached data as a PaperEntry (for article view).
@@ -1408,6 +1508,11 @@ impl App {
                 let sel = self.vault_state.selected().map_or(0, |i| i + 1);
                 (sel, total)
             }
+            FeedMode::News => {
+                let total = self.filtered_news_indices().len();
+                let sel = self.news_state.selected().map_or(0, |i| i + 1);
+                (sel, total)
+            }
         }
     }
 
@@ -1416,7 +1521,8 @@ impl App {
     fn scroll_down(&mut self) {
         // Help scroll
         if self.input_mode == InputMode::Help {
-            self.help_scroll = self.help_scroll.saturating_add(1);
+            let max = crate::ui::widgets::help::max_help_scroll();
+            self.help_scroll = (self.help_scroll + 1).min(max);
             return;
         }
         // Collection picker scroll
@@ -1461,6 +1567,12 @@ impl App {
                     if len == 0 { return; }
                     let i = self.vault_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
                     self.vault_state.select(Some(i));
+                }
+                FeedMode::News => {
+                    let len = self.filtered_news_indices().len();
+                    if len == 0 { return; }
+                    let i = self.news_state.selected().map_or(0, |i| if i >= len - 1 { 0 } else { i + 1 });
+                    self.news_state.select(Some(i));
                 }
             },
             ActivePane::Highlight => {
@@ -1521,6 +1633,12 @@ impl App {
                     let i = self.vault_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
                     self.vault_state.select(Some(i));
                 }
+                FeedMode::News => {
+                    let len = self.filtered_news_indices().len();
+                    if len == 0 { return; }
+                    let i = self.news_state.selected().map_or(0, |i| if i == 0 { len - 1 } else { i - 1 });
+                    self.news_state.select(Some(i));
+                }
             },
             ActivePane::Highlight => {
                 self.highlight_scroll = self.highlight_scroll.saturating_sub(1);
@@ -1542,6 +1660,9 @@ impl App {
                 }
                 FeedMode::Vault => {
                     self.vault_state.select(Some(0));
+                }
+                FeedMode::News if !self.filtered_news_indices().is_empty() => {
+                    self.news_state.select(Some(0));
                 }
                 _ => {}
             },
@@ -1572,6 +1693,12 @@ impl App {
                     };
                     if len > 0 {
                         self.vault_state.select(Some(len - 1));
+                    }
+                }
+                FeedMode::News => {
+                    let len = self.filtered_news_indices().len();
+                    if len > 0 {
+                        self.news_state.select(Some(len - 1));
                     }
                 }
             },
@@ -1669,6 +1796,12 @@ impl App {
     }
 
     fn export_to_obsidian(&mut self) {
+        // News mode → news export pipeline
+        if self.feed_mode == FeedMode::News {
+            self.export_news_to_obsidian();
+            return;
+        }
+
         let Some(paper) = self.active_paper() else {
             self.set_status("No paper selected.");
             return;
@@ -1754,6 +1887,70 @@ impl App {
             Ok(crate::obsidian::ExportResult::AlreadyExists(_)) => {
                 // Shouldn't happen since we check beforehand, but handle gracefully
                 self.set_status("Already exported (use [o] again to replace).");
+            }
+            Err(e) => {
+                self.set_status(format!("ERR: {}", e));
+            }
+        }
+    }
+
+    fn export_news_to_obsidian(&mut self) {
+        let Some(article) = self.selected_news_article().cloned() else {
+            self.set_status("No article selected.");
+            return;
+        };
+        if article.url.is_empty() {
+            self.set_status("Article has no URL.");
+            return;
+        }
+
+        // Duplicate check
+        let exists = crate::obsidian::news_article_exists(&article, &self.config.obsidian);
+        if exists {
+            self.confirm_message = "Article already exported. [y] replace  [n] cancel".into();
+            self.input_mode = InputMode::Confirm;
+            let art = article.clone();
+            self.confirm_action = Some(Box::new(move |app: &mut App| {
+                app.do_news_export_pipeline(&art, true);
+            }));
+            return;
+        }
+
+        self.do_news_export_pipeline(&article, false);
+    }
+
+    fn do_news_export_pipeline(&mut self, article: &NewsArticle, force: bool) {
+        if self.news_text_cache.contains_key(&article.url) {
+            self.do_news_export_now_force(article, force);
+            return;
+        }
+        self.pending_news_export = Some(article.clone());
+        let _ = self
+            .net_tx
+            .try_send(NetworkAction::FetchNewsArticle(article.url.clone()));
+        self.set_status("Downloading article... will export automatically.");
+    }
+
+    fn do_news_export_now(&mut self, article: &NewsArticle) {
+        // Default to non-force; the pending flow only triggers after a confirm or first-time
+        self.do_news_export_now_force(article, false);
+    }
+
+    fn do_news_export_now_force(&mut self, article: &NewsArticle, force: bool) {
+        let Some(body) = self.news_text_cache.get(&article.url).cloned() else {
+            self.set_status("Article body missing — try again.");
+            return;
+        };
+        match crate::obsidian::export_news_article(article, &body, &self.config.obsidian, force) {
+            Ok(crate::obsidian::ExportResult::Created(path))
+            | Ok(crate::obsidian::ExportResult::Updated(path)) => {
+                self.set_status(format!(
+                    "Exported: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            Ok(crate::obsidian::ExportResult::AlreadyExists(_)) => {
+                self.set_status("Already exported (press [o] again to replace).");
             }
             Err(e) => {
                 self.set_status(format!("ERR: {}", e));
@@ -1853,6 +2050,11 @@ impl App {
                         .filter(|u| !u.is_empty())
                 }
                 FeedMode::Vault => None, // handled above
+                FeedMode::News => {
+                    self.selected_news_article()
+                        .map(|a| a.url.clone())
+                        .filter(|u| !u.is_empty())
+                }
             }
         };
 

@@ -15,6 +15,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             FeedMode::Papers => "PAPERS",
             FeedMode::Social => "SOCIAL",
             FeedMode::Vault => "VAULT",
+            FeedMode::News => "NEWS",
         },
         crate::app::ActivePane::Highlight => "SPOTLIGHT",
         crate::app::ActivePane::Article => "ARTICLE",

@@ -1,6 +1,6 @@
 [package]
 name = "tensorterm"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Cyberpunk research intelligence terminal dashboard"
 license = "MIT"
@@ -18,3 +18,4 @@ toml = "0.8"
 dirs = "5"
 color-eyre = "0.6"
 roxmltree = "0.20"
+html2md = "0.2"

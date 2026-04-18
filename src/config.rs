@@ -14,6 +14,7 @@ pub struct Config {
     pub llm: LlmConfig,
     pub obsidian: ObsidianConfig,
     pub social: SocialConfig,
+    pub news: NewsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +112,20 @@ pub struct SocialConfig {
 pub struct SocialFeedConfig {
     pub name: String,
     pub source: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NewsConfig {
+    pub feeds: Vec<NewsFeedConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewsFeedConfig {
+    pub name: String,
+    pub url: String,
     #[serde(default)]
     pub keywords: Vec<String>,
 }
@@ -224,6 +239,7 @@ impl Default for Config {
             llm: LlmConfig::default(),
             obsidian: ObsidianConfig::default(),
             social: SocialConfig::default(),
+            news: NewsConfig::default(),
         }
     }
 }
@@ -274,6 +290,75 @@ impl Default for SocialConfig {
                     name: "Elon Musk".into(),
                     source: "twitter:elonmusk".into(),
                     keywords: vec!["AI".into(), "xAI".into(), "Grok".into(), "compute".into(), "neural".into(), "AGI".into()],
+                },
+            ],
+        }
+    }
+}
+
+impl Default for NewsConfig {
+    fn default() -> Self {
+        Self {
+            feeds: vec![
+                NewsFeedConfig {
+                    name: "DeepMind".into(),
+                    url: "https://deepmind.google/blog/rss.xml".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "MIT News AI".into(),
+                    url: "https://news.mit.edu/rss/topic/artificial-intelligence2".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "Google Research".into(),
+                    url: "https://research.google/blog/rss/".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "HuggingFace Blog".into(),
+                    url: "https://huggingface.co/blog/feed.xml".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "AWS AI".into(),
+                    url: "https://aws.amazon.com/blogs/aws/category/artificial-intelligence/feed/".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "AWS ML".into(),
+                    url: "https://aws.amazon.com/blogs/machine-learning/feed/".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "NVIDIA Blog".into(),
+                    url: "https://blogs.nvidia.com/feed/".into(),
+                    keywords: vec![
+                        "AI".into(),
+                        "LLM".into(),
+                        "inference".into(),
+                        "CUDA".into(),
+                        "GPU".into(),
+                        "deep learning".into(),
+                        "machine learning".into(),
+                        "neural".into(),
+                        "Nemotron".into(),
+                    ],
+                },
+                NewsFeedConfig {
+                    name: "Apple ML Research".into(),
+                    url: "https://machinelearning.apple.com/rss.xml".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "OpenAI News".into(),
+                    url: "https://openai.com/news/rss.xml".into(),
+                    keywords: vec![],
+                },
+                NewsFeedConfig {
+                    name: "CMU ML Blog".into(),
+                    url: "https://blog.ml.cmu.edu/feed/".into(),
+                    keywords: vec![],
                 },
             ],
         }
@@ -375,4 +460,50 @@ source = "rss:https://www.dwarkeshpatel.com/feed"
 name = "Elon Musk"
 source = "twitter:elonmusk"
 keywords = ["AI", "xAI", "Grok", "compute", "neural", "AGI"]
+
+# ── News (AI Research Blogs) ───────────────────
+#
+# RSS/Atom feeds from AI research labs and tech companies.
+# Add per-source `keywords` to filter mixed-content blogs (e.g. NVIDIA).
+
+[[news.feeds]]
+name = "DeepMind"
+url = "https://deepmind.google/blog/rss.xml"
+
+[[news.feeds]]
+name = "MIT News AI"
+url = "https://news.mit.edu/rss/topic/artificial-intelligence2"
+
+[[news.feeds]]
+name = "Google Research"
+url = "https://research.google/blog/rss/"
+
+[[news.feeds]]
+name = "HuggingFace Blog"
+url = "https://huggingface.co/blog/feed.xml"
+
+[[news.feeds]]
+name = "AWS AI"
+url = "https://aws.amazon.com/blogs/aws/category/artificial-intelligence/feed/"
+
+[[news.feeds]]
+name = "AWS ML"
+url = "https://aws.amazon.com/blogs/machine-learning/feed/"
+
+[[news.feeds]]
+name = "NVIDIA Blog"
+url = "https://blogs.nvidia.com/feed/"
+keywords = ["AI", "LLM", "inference", "CUDA", "GPU", "deep learning", "machine learning", "neural", "Nemotron"]
+
+[[news.feeds]]
+name = "Apple ML Research"
+url = "https://machinelearning.apple.com/rss.xml"
+
+[[news.feeds]]
+name = "OpenAI News"
+url = "https://openai.com/news/rss.xml"
+
+[[news.feeds]]
+name = "CMU ML Blog"
+url = "https://blog.ml.cmu.edu/feed/"
 "#;

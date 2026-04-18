@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use crate::app::{PaperEntry, PaperMeta};
 use crate::config::ObsidianConfig;
+use crate::providers::news::NewsArticle;
 
 const KB_FOLDER: &str = "tensor_term_kb";
+const NEWS_FOLDER: &str = "tensor_term_kb/news";
 
 /// Check if a paper has already been exported (by arxiv_id prefix).
 pub fn paper_exists(arxiv_id: &str, config: &ObsidianConfig) -> bool {
@@ -289,4 +291,142 @@ exported: {today}
     md.push_str("\n## Notes\n\n<!-- Your research notes here -->\n");
 
     md
+}
+
+// ── News export ──────────────────────────────────────────────
+
+pub fn news_article_exists(article: &NewsArticle, config: &ObsidianConfig) -> bool {
+    if config.vault_path.is_empty() {
+        return false;
+    }
+    let expanded = expand_vault(&config.vault_path);
+    let news_dir = expanded.join(NEWS_FOLDER);
+    let filename = generate_news_filename(article);
+    news_dir.join(filename).exists()
+}
+
+pub fn export_news_article(
+    article: &NewsArticle,
+    body_markdown: &str,
+    config: &ObsidianConfig,
+    force: bool,
+) -> Result<ExportResult, String> {
+    if config.vault_path.is_empty() {
+        return Err("Obsidian vault_path not configured. Set it in config.toml".into());
+    }
+
+    let expanded = expand_vault(&config.vault_path);
+    if !expanded.exists() {
+        return Err(format!("Vault path does not exist: {}", config.vault_path));
+    }
+
+    let news_dir = expanded.join(NEWS_FOLDER);
+    std::fs::create_dir_all(&news_dir)
+        .map_err(|e| format!("Failed to create {}: {}", news_dir.display(), e))?;
+
+    let filename = generate_news_filename(article);
+    let filepath = news_dir.join(&filename);
+
+    if !force && filepath.exists() {
+        return Ok(ExportResult::AlreadyExists(filepath));
+    }
+
+    let content = generate_news_markdown(article, body_markdown);
+    std::fs::write(&filepath, content)
+        .map_err(|e| format!("Failed to write {}: {}", filepath.display(), e))?;
+
+    if force {
+        Ok(ExportResult::Updated(filepath))
+    } else {
+        Ok(ExportResult::Created(filepath))
+    }
+}
+
+fn expand_vault(vault_path: &str) -> PathBuf {
+    if vault_path.starts_with('~') {
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(vault_path.strip_prefix("~/").unwrap_or(&vault_path[1..]))
+    } else {
+        PathBuf::from(vault_path)
+    }
+}
+
+fn slugify(input: &str, max_len: usize) -> String {
+    let s: String = input
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+    if s.len() > max_len {
+        s[..max_len].trim_end_matches('-').to_string()
+    } else {
+        s
+    }
+}
+
+fn generate_news_filename(article: &NewsArticle) -> String {
+    let date_prefix = article
+        .published
+        .chars()
+        .take(10)
+        .collect::<String>();
+    let safe_date = if date_prefix.contains('-') && date_prefix.len() == 10 {
+        date_prefix
+    } else {
+        // RFC 2822 dates need different prefix; use sanitized first 10 chars
+        article.published.chars().take(10).collect::<String>().replace(' ', "-").replace(',', "")
+    };
+    let source_slug = slugify(&article.source_name, 24);
+    let title_slug = slugify(&article.title, 60);
+    format!("{}_{}_{}.md", safe_date, source_slug, title_slug)
+}
+
+fn generate_news_markdown(article: &NewsArticle, body: &str) -> String {
+    let today = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let days = (secs / 86400) as i64;
+        let (y, m, d) = crate::app::days_to_ymd(days);
+        format!("{:04}-{:02}-{:02}", y, m, d)
+    };
+
+    let title_escaped = article.title.replace('"', "\\\"");
+    let source_escaped = article.source_name.replace('"', "\\\"");
+
+    format!(
+        r#"---
+title: "{title}"
+source: "{source}"
+url: "{url}"
+published: "{published}"
+exported: {today}
+tags:
+  - news
+  - {source_tag}
+---
+
+# {title}
+
+**Source**: {source}  |  **Published**: {published}
+**URL**: [{url}]({url})
+
+---
+
+{body}
+"#,
+        title = title_escaped,
+        source = source_escaped,
+        url = article.url,
+        published = article.published,
+        today = today,
+        source_tag = slugify(&article.source_name, 32),
+        body = body.trim(),
+    )
 }

@@ -25,6 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 VaultLevel::Collections => "VAULT".to_string(),
                 VaultLevel::Papers(col) => format!("VAULT \u{2192} {}", col),
             },
+            FeedMode::News => "NEWS FEED".to_string(),
         }
     };
 
@@ -65,6 +66,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         FeedMode::Papers => render_papers(frame, area, app, block),
         FeedMode::Social => render_social(frame, area, app, block),
         FeedMode::Vault => render_vault(frame, area, app, block),
+        FeedMode::News => render_news(frame, area, app, block),
     }
 }
 
@@ -397,4 +399,75 @@ fn render_vault(
             frame.render_stateful_widget(list, area, &mut app.vault_state);
         }
     }
+}
+
+fn render_news(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    block: ratatui::widgets::Block<'static>,
+) {
+    if app.is_loading() && app.news_items.is_empty() {
+        let idx = (app.tick_count as usize) % SPINNER.len();
+        let loading = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  {} Fetching news\u{2026}", SPINNER[idx]),
+                Theme::accent(),
+            )),
+        ];
+        let paragraph = Paragraph::new(loading).block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let indices = app.filtered_news_indices();
+
+    if indices.is_empty() {
+        let mut lines = filter_bar_lines(app);
+        lines.push(Line::from(""));
+        if !app.filter_text.is_empty() {
+            lines.push(Line::from(Span::styled("  No matches.", Theme::dim())));
+        } else if app.news_items.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  No news loaded. Check news config.",
+                Theme::dim(),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("  No articles in the past {}.", app.time_window.label()),
+                Theme::accent(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  Press [t] to increase the time window.",
+                Theme::dim(),
+            )));
+        }
+        let paragraph = Paragraph::new(lines).block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = indices
+        .iter()
+        .map(|&i| {
+            let article = &app.news_items[i];
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", article.source_name),
+                    Style::default()
+                        .fg(Theme::DOMAIN_TAG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(article.title.clone(), Theme::text()),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Theme::highlight_bar())
+        .highlight_symbol(" >> ");
+
+    frame.render_stateful_widget(list, area, &mut app.news_state);
 }

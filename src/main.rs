@@ -128,10 +128,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config) ->
     let mut app = App::new(config, net_action_tx, net_event_rx, app_providers);
     let events = EventHandler::new(tick_rate);
 
-    // Initial feed load + HF spotlight + social feed
+    // Initial feed load + HF spotlight + social feed + news feed
     app.request_feed_refresh();
     app.request_hf_spotlight();
     app.request_social_refresh();
+    app.request_news_refresh();
 
     while app.running {
         terminal.draw(|frame| ui::render(frame, &mut app))?;

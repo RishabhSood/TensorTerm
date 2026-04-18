@@ -9,8 +9,18 @@ use ratatui::{
 use crate::app::App;
 use crate::ui::Theme;
 
+const POPUP_WIDTH: u16 = 58;
+const POPUP_HEIGHT: u16 = 32;
+const HELP_LINE_COUNT: u16 = 37;
+
+/// Max scroll position for the help popup (so the bottom line stays visible).
+pub fn max_help_scroll() -> u16 {
+    let inner = POPUP_HEIGHT.saturating_sub(2); // borders
+    HELP_LINE_COUNT.saturating_sub(inner)
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    let popup = centered_rect(58, 32, area);
+    let popup = centered_rect(POPUP_WIDTH, POPUP_HEIGHT, area);
     frame.render_widget(Clear, popup);
 
     let sep = "\u{2500}".repeat(52);
@@ -47,7 +57,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         help_line("  L", "Cycle LLM provider"),
         help_line("  p", "Cycle research profile"),
         help_line("  r", "Refresh feed"),
-        help_line("  f", "Cycle feed (papers/social/vault)"),
+        help_line("  f", "Cycle feed (papers/social/news)"),
+        help_line("  v", "Toggle Vault (bookmarked papers)"),
         help_line("  /", "Filter feed (type to search)"),
         help_line("  S", "Search papers (HuggingFace)"),
         help_line("  s", "Cycle sort (papers only)"),

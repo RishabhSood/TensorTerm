@@ -17,6 +17,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         FeedMode::Papers => "ARTICLE VIEW",
         FeedMode::Social => "POST VIEW",
         FeedMode::Vault => "VAULT ARTICLE",
+        FeedMode::News => "NEWS ARTICLE",
     };
     let block = pane_block(title, is_active, app.tick_count, false);
 
@@ -24,6 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         FeedMode::Papers => render_paper_content(app, area),
         FeedMode::Social => render_social_content(app),
         FeedMode::Vault => render_vault_content(app, area),
+        FeedMode::News => render_news_content(app),
     };
 
     // Cap article scroll at content height
@@ -707,4 +709,58 @@ fn render_vault_content(app: &mut App, area: Rect) -> Vec<Line<'static>> {
             lines
         }
     }
+}
+
+fn render_news_content(app: &App) -> Vec<Line<'static>> {
+    let Some(article) = app.selected_news_article() else {
+        return vec![
+            Line::from(""),
+            Line::from(Span::styled("  Select an article from the news feed.", Theme::dim())),
+        ];
+    };
+
+    let title = article.title.clone();
+    let source = article.source_name.clone();
+    let summary = article.summary.clone();
+    let url = article.url.clone();
+    let published = article.published.clone();
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Theme::NEON_CYAN)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Source   ", Theme::dim()),
+            Span::styled(
+                source,
+                Style::default()
+                    .fg(Theme::DOMAIN_TAG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Date     ", Theme::dim()),
+            Span::styled(published, Theme::text()),
+        ]),
+    ];
+
+    if !summary.is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(crate::ui::markdown::render_markdown(&summary));
+    }
+
+    if !url.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(url, Theme::accent())));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("[o]      Export to Obsidian vault", Theme::accent())));
+    lines.push(Line::from(Span::styled("[Enter]  Open in browser", Theme::accent())));
+
+    lines
 }
