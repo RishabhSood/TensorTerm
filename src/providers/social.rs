@@ -18,25 +18,32 @@ pub enum SourceType {
     Blog,
 }
 
+/// Aggregate fetch with no progress reporting. Kept for callers that don't
+/// need per-source events (the worker uses `fetch_one` directly for the splash).
+#[allow(dead_code)]
 pub async fn fetch_social_feeds(
     client: &Client,
     feeds: &[SocialFeedConfig],
     nitter_instance: &str,
 ) -> Result<Vec<SocialPost>, String> {
     let mut all_posts = Vec::new();
-
     for feed in feeds {
-        let (url, source_type) = parse_source(&feed.source, nitter_instance);
-        match fetch_single_feed(client, &url, &feed.name, source_type, &feed.keywords, nitter_instance).await {
-            Ok(posts) => all_posts.extend(posts),
-            Err(_) => {} // Individual feed failures are silent
+        if let Ok(posts) = fetch_one(client, feed, nitter_instance).await {
+            all_posts.extend(posts);
         }
     }
-
-    // Sort by date descending (lexicographic works for ISO dates)
     all_posts.sort_by(|a, b| b.published.cmp(&a.published));
-
     Ok(all_posts)
+}
+
+/// Fetch a single configured social feed. Used for per-source progress reporting.
+pub async fn fetch_one(
+    client: &Client,
+    feed: &SocialFeedConfig,
+    nitter_instance: &str,
+) -> Result<Vec<SocialPost>, String> {
+    let (url, source_type) = parse_source(&feed.source, nitter_instance);
+    fetch_single_feed(client, &url, &feed.name, source_type, &feed.keywords, nitter_instance).await
 }
 
 fn parse_source(source: &str, nitter_instance: &str) -> (String, SourceType) {

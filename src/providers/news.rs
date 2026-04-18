@@ -11,23 +11,29 @@ pub struct NewsArticle {
     pub published: String,
 }
 
+/// Aggregate fetch with no progress reporting. Kept for callers that don't
+/// need per-source events (the worker uses `fetch_one` directly for the splash).
+#[allow(dead_code)]
 pub async fn fetch_news_feeds(
     client: &Client,
     feeds: &[NewsFeedConfig],
 ) -> Result<Vec<NewsArticle>, String> {
     let mut all_articles = Vec::new();
-
     for feed in feeds {
-        match fetch_single_feed(client, &feed.url, &feed.name, &feed.keywords).await {
-            Ok(articles) => all_articles.extend(articles),
-            Err(_) => {} // individual feed failures are silent
+        if let Ok(articles) = fetch_one(client, feed).await {
+            all_articles.extend(articles);
         }
     }
-
-    // Sort by date descending (lexicographic works for ISO; RSS dates start with weekday so use a normalizer if needed)
     all_articles.sort_by(|a, b| b.published.cmp(&a.published));
-
     Ok(all_articles)
+}
+
+/// Fetch a single configured news feed. Used for per-source progress reporting.
+pub async fn fetch_one(
+    client: &Client,
+    feed: &NewsFeedConfig,
+) -> Result<Vec<NewsArticle>, String> {
+    fetch_single_feed(client, &feed.url, &feed.name, &feed.keywords).await
 }
 
 async fn fetch_single_feed(
