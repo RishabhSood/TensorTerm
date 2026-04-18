@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::app::{CitingPaper, PaperEntry, PaperMeta, MetaFetchStatus};
+use crate::app::{CitingPaper, PaperEntry, PaperMeta, MetaFetchStatus, SourceKind, SourceStatus};
 use crate::config::{NewsFeedConfig, Profile, SocialFeedConfig};
 use crate::llm::{self, ChatMessage, LlmProvider};
 use crate::providers;
@@ -46,6 +46,7 @@ pub enum NetworkEvent {
     ScaffoldLoaded { arxiv_id: String, text: String },
     FullTextLoaded { arxiv_id: String, text: String },
     SearchResultsLoaded(Vec<PaperEntry>),
+    SourceProgress { kind: SourceKind, name: String, status: SourceStatus },
     Error(String),
 }
 
@@ -70,14 +71,28 @@ pub fn spawn_worker(
             tokio::spawn(async move {
                 match action {
                     NetworkAction::FetchFeed(profile) => {
+                        let _ = tx.send(NetworkEvent::SourceProgress {
+                            kind: SourceKind::Papers,
+                            name: profile.name.clone(),
+                            status: SourceStatus::Started,
+                        });
                         let max_results = 50;
-                        match providers::arxiv::fetch_papers(
+                        let result = providers::arxiv::fetch_papers(
                             &client,
                             &profile.arxiv_categories,
                             max_results,
                         )
-                        .await
-                        {
+                        .await;
+                        let status = match &result {
+                            Ok(p) if !p.is_empty() => SourceStatus::Done,
+                            _ => SourceStatus::Failed,
+                        };
+                        let _ = tx.send(NetworkEvent::SourceProgress {
+                            kind: SourceKind::Papers,
+                            name: profile.name.clone(),
+                            status,
+                        });
+                        match result {
                             Ok(papers) if !papers.is_empty() => {
                                 let _ = tx.send(NetworkEvent::FeedLoaded(papers));
                             }
@@ -97,7 +112,22 @@ pub fn spawn_worker(
                     }
 
                     NetworkAction::FetchHfSpotlight => {
-                        match providers::huggingface::fetch_spotlight(&client).await {
+                        let _ = tx.send(NetworkEvent::SourceProgress {
+                            kind: SourceKind::HfSpotlight,
+                            name: "Daily Paper".into(),
+                            status: SourceStatus::Started,
+                        });
+                        let result = providers::huggingface::fetch_spotlight(&client).await;
+                        let status = match &result {
+                            Ok(_) => SourceStatus::Done,
+                            Err(_) => SourceStatus::Failed,
+                        };
+                        let _ = tx.send(NetworkEvent::SourceProgress {
+                            kind: SourceKind::HfSpotlight,
+                            name: "Daily Paper".into(),
+                            status,
+                        });
+                        match result {
                             Ok(spotlight) => {
                                 let _ = tx.send(NetworkEvent::HfSpotlightLoaded(spotlight));
                             }
@@ -191,25 +221,55 @@ pub fn spawn_worker(
                     }
 
                     NetworkAction::FetchSocialFeed(feeds, nitter) => {
-                        match providers::social::fetch_social_feeds(&client, &feeds, &nitter).await {
-                            Ok(posts) => {
-                                let _ = tx.send(NetworkEvent::SocialFeedLoaded(posts));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(NetworkEvent::Error(format!("Social: {}", e)));
+                        let mut all_posts = Vec::new();
+                        for feed in &feeds {
+                            let _ = tx.send(NetworkEvent::SourceProgress {
+                                kind: SourceKind::Social,
+                                name: feed.name.clone(),
+                                status: SourceStatus::Started,
+                            });
+                            let result = providers::social::fetch_one(&client, feed, &nitter).await;
+                            let status = match &result {
+                                Ok(_) => SourceStatus::Done,
+                                Err(_) => SourceStatus::Failed,
+                            };
+                            let _ = tx.send(NetworkEvent::SourceProgress {
+                                kind: SourceKind::Social,
+                                name: feed.name.clone(),
+                                status,
+                            });
+                            if let Ok(posts) = result {
+                                all_posts.extend(posts);
                             }
                         }
+                        all_posts.sort_by(|a, b| b.published.cmp(&a.published));
+                        let _ = tx.send(NetworkEvent::SocialFeedLoaded(all_posts));
                     }
 
                     NetworkAction::FetchNewsFeed(feeds) => {
-                        match providers::news::fetch_news_feeds(&client, &feeds).await {
-                            Ok(articles) => {
-                                let _ = tx.send(NetworkEvent::NewsFeedLoaded(articles));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(NetworkEvent::Error(format!("News: {}", e)));
+                        let mut all_articles = Vec::new();
+                        for feed in &feeds {
+                            let _ = tx.send(NetworkEvent::SourceProgress {
+                                kind: SourceKind::News,
+                                name: feed.name.clone(),
+                                status: SourceStatus::Started,
+                            });
+                            let result = providers::news::fetch_one(&client, feed).await;
+                            let status = match &result {
+                                Ok(_) => SourceStatus::Done,
+                                Err(_) => SourceStatus::Failed,
+                            };
+                            let _ = tx.send(NetworkEvent::SourceProgress {
+                                kind: SourceKind::News,
+                                name: feed.name.clone(),
+                                status,
+                            });
+                            if let Ok(articles) = result {
+                                all_articles.extend(articles);
                             }
                         }
+                        all_articles.sort_by(|a, b| b.published.cmp(&a.published));
+                        let _ = tx.send(NetworkEvent::NewsFeedLoaded(all_articles));
                     }
 
                     NetworkAction::FetchNewsArticle(url) => {

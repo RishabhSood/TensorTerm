@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, InputMode};
+use crate::app::{App, AppMode, InputMode};
 
 /// Braille spinner frames — shared across all widgets.
 pub const SPINNER: &[char] = &[
@@ -21,6 +21,12 @@ pub const SPINNER: &[char] = &[
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+
+    // Splash takes over the whole frame; nothing else renders behind it.
+    if matches!(app.app_mode, AppMode::Splash) {
+        widgets::splash::render(frame, area, app);
+        return;
+    }
 
     // Dark background
     frame.render_widget(

@@ -4,6 +4,7 @@ pub mod header;
 pub mod help;
 pub mod highlight;
 pub mod modal;
+pub mod splash;
 pub mod status_bar;
 
 use ratatui::{

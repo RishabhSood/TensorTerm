@@ -129,6 +129,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config) ->
     let events = EventHandler::new(tick_rate);
 
     // Initial feed load + HF spotlight + social feed + news feed
+    app.begin_splash();
     app.request_feed_refresh();
     app.request_hf_spotlight();
     app.request_social_refresh();

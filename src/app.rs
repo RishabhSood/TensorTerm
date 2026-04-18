@@ -40,6 +40,48 @@ impl ActivePane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppMode {
+    Splash,
+    Normal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Papers,
+    HfSpotlight,
+    Social,
+    News,
+}
+
+impl SourceKind {
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Papers => "ArXiv",
+            Self::HfSpotlight => "HF Spotlight",
+            Self::Social => "Social",
+            Self::News => "News",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStatus {
+    Started,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct SplashLogEntry {
+    pub kind: SourceKind,
+    pub name: String,
+    pub status: SourceStatus,
+    #[allow(dead_code)]
+    pub at_tick: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
     Help,
@@ -343,9 +385,19 @@ fn normalize_date_to_iso(date_str: &str) -> String {
 const STATUS_DISPLAY_TICKS: u64 = 38; // ~3 seconds at 80ms tick
 const LOAD_PULSE_TICKS: u64 = 4; // ~320ms flash
 const META_DEBOUNCE_TICKS: u64 = 3; // ~240ms debounce
+const SPLASH_TIMEOUT_TICKS: u64 = 100; // ~8 seconds at 80ms tick
+const SPLASH_LINGER_TICKS: u64 = 9; // brief pause after completion (~720ms) so user sees the green "100%"
+
+/// Public re-export so the splash widget can show "auto-dismiss after Ns".
+pub const SPLASH_TIMEOUT_TICKS_PUB: u64 = SPLASH_TIMEOUT_TICKS;
 
 pub struct App {
     pub running: bool,
+    pub app_mode: AppMode,
+    pub splash_log: Vec<SplashLogEntry>,
+    pub splash_started_at: u64,
+    pub splash_total_sources: usize,
+    pub splash_completed: usize,
     pub input_mode: InputMode,
     pub active_pane: ActivePane,
     pub feed_items: Vec<PaperEntry>,
@@ -465,6 +517,11 @@ impl App {
 
         Self {
             running: true,
+            app_mode: AppMode::Splash,
+            splash_log: Vec::new(),
+            splash_started_at: 0,
+            splash_total_sources: 0,
+            splash_completed: 0,
             input_mode: InputMode::Normal,
             active_pane: ActivePane::Feed,
             feed_items: Vec::new(),
@@ -534,6 +591,21 @@ impl App {
             }
         }
         self.check_meta_debounce();
+        self.check_splash_exit();
+    }
+
+    fn check_splash_exit(&mut self) {
+        if !matches!(self.app_mode, AppMode::Splash) {
+            return;
+        }
+        let elapsed = self.tick_count.wrapping_sub(self.splash_started_at);
+        let timed_out = elapsed > SPLASH_TIMEOUT_TICKS;
+        let all_done = self.splash_total_sources > 0
+            && self.splash_completed >= self.splash_total_sources
+            && elapsed > SPLASH_LINGER_TICKS;
+        if timed_out || all_done {
+            self.app_mode = AppMode::Normal;
+        }
     }
 
     fn check_meta_debounce(&mut self) {
@@ -701,6 +773,34 @@ impl App {
                         self.do_export_now(force);
                     }
                 }
+                NetworkEvent::SourceProgress { kind, name, status } => {
+                    // Only track during splash; ignored after entering Normal mode.
+                    if matches!(self.app_mode, AppMode::Splash) {
+                        if matches!(status, SourceStatus::Done | SourceStatus::Failed) {
+                            self.splash_completed += 1;
+                        }
+                        // Dedupe: if an entry for the same (kind, name) already exists,
+                        // update it in place so the log stays stable and clean.
+                        let new_entry = SplashLogEntry {
+                            kind,
+                            name: name.clone(),
+                            status,
+                            at_tick: self.tick_count,
+                        };
+                        if let Some(existing) = self.splash_log.iter_mut().find(|e| {
+                            e.kind == kind && e.name == name
+                        }) {
+                            *existing = new_entry;
+                        } else {
+                            self.splash_log.push(new_entry);
+                        }
+                        // Cap log size defensively
+                        if self.splash_log.len() > 200 {
+                            let drop_n = self.splash_log.len() - 200;
+                            self.splash_log.drain(0..drop_n);
+                        }
+                    }
+                }
                 NetworkEvent::Error(msg) => {
                     self.set_status(format!("ERR: {}", msg));
                 }
@@ -711,6 +811,18 @@ impl App {
     // ── Input: map then dispatch ─────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Splash screen: any keypress skips it; q / Ctrl+C still quits.
+        if matches!(self.app_mode, AppMode::Splash) {
+            let is_quit = matches!(key.code, KeyCode::Char('q'))
+                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('c')));
+            if is_quit {
+                self.running = false;
+            } else {
+                self.app_mode = AppMode::Normal;
+            }
+            return;
+        }
         if let Some(action) = self.map_key(key) {
             self.dispatch(action);
         }
@@ -1201,6 +1313,19 @@ impl App {
         let feeds = self.config.news.feeds.clone();
         self.loading.insert(LoadingTask::NewsFeed);
         let _ = self.net_tx.try_send(NetworkAction::FetchNewsFeed(feeds));
+    }
+
+    /// Initialize splash counters before the startup batch fetches.
+    /// Should be called once on app launch, before `request_*_refresh`.
+    pub fn begin_splash(&mut self) {
+        let social_count = self.config.social.feeds.len();
+        let news_count = self.config.news.feeds.len();
+        // 1 (Papers profile) + 1 (HF spotlight) + per-source social + per-source news.
+        self.splash_total_sources = 2 + social_count + news_count;
+        self.splash_completed = 0;
+        self.splash_log.clear();
+        self.splash_started_at = self.tick_count;
+        self.app_mode = AppMode::Splash;
     }
 
     // ── Dynamic Spotlight ────────────────────────────────────
