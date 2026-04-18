@@ -593,6 +593,7 @@ Event handling uses a dual-channel architecture: crossterm key/mouse events on a
 - **Confirmation modals for vault deletes**: removing a paper or deleting a collection now requires `[y]` confirmation; Reading List is permanently protected from deletion
 
 **UX Polish**
+- Add Splash Screen
 - Help overlay scrolling is bounded: no more scrolling past the last keybinding
 - `r` (refresh) is context-aware: Papers / Social / News refresh their respective feed; Vault is no-op (local data)
 
